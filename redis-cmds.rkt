@@ -53,9 +53,38 @@
 (define (SET/list #:rconn [rconn (current-redis-connection)] key lst)
   (DEL #:rconn rconn key)
   (for/last ([x lst]) (RPUSH #:rconn rconn key x)))
-(define (GET/list #:rconn [rconn (current-redis-connection)] key)
+(define (POP/list #:rconn [rconn (current-redis-connection)] key 
+                  #:map-fn [f identity])
   (let loop ([x (LPOP #:rconn rconn key)])
-    (if x (cons x (loop (LPOP #:rconn rconn key))) null)))
+    (if x (cons (f x) (loop (LPOP #:rconn rconn key))) null)))
+(define (GET/list #:rconn [rconn (current-redis-connection)] key 
+                  #:map-fn [f identity])
+  (let loop ([n (sub1 (LLEN #:rconn rconn key))])
+    (if (< n 0) null
+        (let ([x (LINDEX key n)]) (if x (cons (f x) (loop (sub1 n))))))))
+(define (GET/set #:rconn [rconn (current-redis-connection)] key 
+                  #:map-fn [f identity])
+  (list->set (map f (SMEMBERS #:rconn rconn))))
+(define (SET/set #:rconn [rconn (current-redis-connection)] k xs)
+  (DEL #:rconn rconn key)
+  (for ([x (in-set xs)]) (SADD #:rconn rconn key x)))
+(define (GET/hash #:rconn [rconn (current-redis-connection)] key
+                  #:map-key [fkey identity] #:map-val [fval identity])
+  (let loop ([lst (HGETALL #:rconn rconn key)] [h (hash)])
+    (if (null? lst) h 
+        (loop (cddr lst) (hash-set h (fkey (car lst)) (fval (cadr lst)))))))
+(define (SET/hash #:rconn [rconn (current-redis-connection)] key h)
+  (DEL #:rconn rconn key)
+  (for ([(k v) (in-hash h)]) (HSET #:rconn rconn key k v)))
+(define (GET/heap #:rconn [rconn (current-redis-connection)] key
+                  #:map-fn [f identity] #:map-score [fsco identity])
+  (define hp (make-heap (λ (x y) (<= (car x) (car y)))))
+  (let loop ([lst (ZRANGE key 0 -1 'WITHSCORES)])
+    (unless (null? lst) (heap-add! hp (cons (fsco (cadr lst)) (f (car lst))))))
+  hp)
+    
+  
+
 
 ;; DUMP and RESTORE
 (defcmd/chknil DUMP)
