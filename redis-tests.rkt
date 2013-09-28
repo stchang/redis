@@ -1,6 +1,7 @@
 #lang racket
-(require "redis.rkt")
-(require "redis-cmds.rkt")
+(require "redis.rkt"
+         "redis-cmds.rkt"
+         "bytes-utils.rkt")
 (require rackunit data/heap)
 
 
@@ -197,18 +198,15 @@
   (check-equal? (GET/list "lst") (list #"1" #"2" #"3"))
   (check-equal? (POP/list "lst") (list #"1" #"2" #"3"))
   (SET/hash "hsh" (hash 'a 10 'b 20 'c 30))
-  (check-equal? (GET/hash "hsh"
-                          #:map-key (o string->symbol bytes->string/utf-8)
-                          #:map-val (o string->number bytes->string/utf-8))
+  (check-equal? (GET/hash "hsh" #:map-key bytes->symbol
+                                #:map-val bytes->number)
                 (hash 'a 10 'b 20 'c 30))
   (SET/set "s" (set 1 2 3 4 5))
-  (check-equal? (GET/set "s" #:map-fn (o string->number bytes->string/utf-8))
-                (set 1 2 3 4 5))
+  (check-equal? (GET/set "s" #:map-fn bytes->number) (set 1 2 3 4 5))
   (SET/heap "hp" (hash 'a 30 'b 10 'c 20))
   (check-equal? (heap->vector
-                 (GET/heap "hp"
-                           #:map-fn (o string->symbol bytes->string/utf-8)
-                           #:map-score (o string->number bytes->string/utf-8)))
+                 (GET/heap "hp" #:map-fn bytes->symbol
+                                #:map-score bytes->number))
                 (let ([h (make-heap (lambda (x y) (<= (car x) (car y))))])
                   (heap-add-all! h '((30 . a) (10 . b) (20 . c)))
                   (heap->vector h)))

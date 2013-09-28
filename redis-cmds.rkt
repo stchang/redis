@@ -1,5 +1,6 @@
 #lang racket
-(require "redis.rkt")
+(require "redis.rkt"
+         "bytes-utils.rkt")
 (require (for-syntax syntax/parse))
 (require data/heap)
 
@@ -11,8 +12,6 @@
 ;; [o] 2013-09-25: SUBSCRIBE cmd should return (async?) channel?
 ;; [o] 2013-09-23: define macro that defines defcmd and defcmds at same time
 ;; [o] 2013-09-23: define macro that defines all GET/SET variants
-
-(define o compose)
 
 (define-syntax (defcmd stx)
   (syntax-parse stx
@@ -47,7 +46,7 @@
 (define (GET/str #:rconn [rconn (current-redis-connection)] key)
   (GET/as #:rconn rconn key #:conv bytes->string/utf-8))
 (define (GET/num #:rconn [rconn (current-redis-connection)] key)
-  (GET/as #:rconn rconn key #:conv (o string->number bytes->string/utf-8)))
+  (GET/as #:rconn rconn key #:conv bytes->number))
 (define (GETRANGE/str #:rconn [rconn (current-redis-connection)] key start end)
   (define reply (GETRANGE #:rconn rconn key start end))
   (and reply (bytes->string/utf-8 reply)))

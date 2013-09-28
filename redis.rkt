@@ -11,6 +11,7 @@
 ;;                 - makes it hard to use parameterize with (connect)
 ;;     DONE: 2013-09-26
 
+(require "bytes-utils.rkt")
 (provide connect disconnect send-cmd current-redis-connection
          exn:fail:redis? get-reply)
 
@@ -52,8 +53,8 @@
    (arg->bytes cmd)
    (apply bytes-append (map arg->bytes args))))
 
-(define (number->bytes n) (string->bytes/utf-8 (number->string n)))
-(define (symbol->bytes x) (string->bytes/utf-8 (symbol->string x)))
+;(define (number->bytes n) (string->bytes/utf-8 (number->string n)))
+;(define (symbol->bytes x) (string->bytes/utf-8 (symbol->string x)))
 (define (arg->bytes val)
   (define bs
     (cond [(bytes? val) val]
