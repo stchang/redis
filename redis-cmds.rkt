@@ -1,6 +1,7 @@
 #lang racket
 (require "redis.rkt")
 (require (for-syntax syntax/parse))
+(require data/heap)
 
 ; functions for specific redis commands
 
@@ -59,15 +60,16 @@
     (if x (cons (f x) (loop (LPOP #:rconn rconn key))) null)))
 (define (GET/list #:rconn [rconn (current-redis-connection)] key 
                   #:map-fn [f identity])
-  (let loop ([n (sub1 (LLEN #:rconn rconn key))])
-    (if (< n 0) null
-        (let ([x (LINDEX key n)]) (if x (cons (f x) (loop (sub1 n))))))))
+  (let loop ([n (sub1 (LLEN #:rconn rconn key))] [lst null])
+    (if (< n 0) lst
+        (let ([x (LINDEX key n)])
+          (if x (loop (sub1 n) (cons (f x) lst)) (loop (sub1 n) lst))))))
 (define (GET/set #:rconn [rconn (current-redis-connection)] key 
                   #:map-fn [f identity])
-  (list->set (map f (SMEMBERS #:rconn rconn))))
+  (list->set (map f (SMEMBERS #:rconn rconn key))))
 (define (SET/set #:rconn [rconn (current-redis-connection)] k xs)
-  (DEL #:rconn rconn key)
-  (for ([x (in-set xs)]) (SADD #:rconn rconn key x)))
+  (DEL #:rconn rconn k)
+  (for ([x (in-set xs)]) (SADD #:rconn rconn k x)))
 (define (GET/hash #:rconn [rconn (current-redis-connection)] key
                   #:map-key [fkey identity] #:map-val [fval identity])
   (let loop ([lst (HGETALL #:rconn rconn key)] [h (hash)])
@@ -76,11 +78,15 @@
 (define (SET/hash #:rconn [rconn (current-redis-connection)] key h)
   (DEL #:rconn rconn key)
   (for ([(k v) (in-hash h)]) (HSET #:rconn rconn key k v)))
+(define (SET/heap #:rconn [rconn (current-redis-connection)] key h)
+  (for ([(k v) (in-hash h)]) (ZADD #:rconn rconn key v k)))
 (define (GET/heap #:rconn [rconn (current-redis-connection)] key
                   #:map-fn [f identity] #:map-score [fsco identity])
   (define hp (make-heap (λ (x y) (<= (car x) (car y)))))
   (let loop ([lst (ZRANGE key 0 -1 'WITHSCORES)])
-    (unless (null? lst) (heap-add! hp (cons (fsco (cadr lst)) (f (car lst))))))
+    (unless (null? lst)
+      (heap-add! hp (cons (fsco (cadr lst)) (f (car lst))))
+      (loop (cddr lst))))
   hp)
     
   
