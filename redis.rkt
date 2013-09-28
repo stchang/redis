@@ -21,8 +21,7 @@
 
 (define (connect #:host [host "127.0.0.1"] #:port [port 6379])
   (define-values (in out) (tcp-connect host port))
-  (define rconn (redis-connection in out))
-  rconn)
+  (redis-connection in out))
 
 (define (disconnect [rconn (current-redis-connection)])
   (match-define (redis-connection in out) rconn)

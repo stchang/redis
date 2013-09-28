@@ -36,16 +36,20 @@
 (defcmd SET #:return (lambda (reply) (and (not (eq? #\null reply)))))
 (defcmds/ok MSET RENAME)
 ;; SETNX, SETEX, PSETEX: deprecated? use SET + options instead
+
+;; converts bytestring from GET according to conv function
+(define (GET/as #:rconn [rconn (current-redis-connection)] key
+                #:conv [conv identity])
+  (define reply (GET #:rconn rconn key))
+  (and reply (conv reply)))
 ;; returns value of key as string (errors if not valid string)
 (define (GET/str #:rconn [rconn (current-redis-connection)] key)
-  (define reply (GET #:rconn rconn key))
-  (and reply (bytes->string/utf-8 reply)))
+  (GET/as #:rconn rconn key #:conv bytes->string/utf-8))
+(define (GET/num #:rconn [rconn (current-redis-connection)] key)
+  (GET/as #:rconn rconn key #:conv (o string->number bytes->string/utf-8)))
 (define (GETRANGE/str #:rconn [rconn (current-redis-connection)] key start end)
   (define reply (GETRANGE #:rconn rconn key start end))
   (and reply (bytes->string/utf-8 reply)))
-(define (GET/num #:rconn [rconn (current-redis-connection)] key)
-  (define reply (GET #:rconn rconn key))
-  (and reply (string->number (bytes->string/utf-8 reply))))
 (define (SET/list #:rconn [rconn (current-redis-connection)] key lst)
   (DEL #:rconn rconn key)
   (for/last ([x lst]) (RPUSH #:rconn rconn key x)))
