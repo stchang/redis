@@ -20,30 +20,38 @@
 
 (define current-redis-connection (make-parameter #f))
 
+(struct exn:fail:redis exn:fail ())
+
+(define-syntax-rule (redis-error msg)
+  (raise (exn:fail:redis (string-append "redis ERROR: " msg)
+                         (current-continuation-marks))))
+
 (define (connect #:host [host "127.0.0.1"] #:port [port 6379])
   (define-values (in out) (tcp-connect host port))
   (redis-connection in out))
 
 (define (disconnect [rconn (current-redis-connection)])
+  (unless rconn
+    (redis-error "Can't disconnect when not connected to server."))
   (match-define (redis-connection in out) rconn)
   (send-cmd #:rconn rconn "QUIT")
   (close-input-port in) (close-output-port out))
 
 ;; send cmd/recv reply --------------------------------------------------------
 (define CRLF #"\r\n")
-(struct exn:fail:redis exn:fail ())
 
 (define (send-cmd #:rconn [rconn (current-redis-connection)] cmd . args)
+  (unless rconn
+    (redis-error
+     (format "Can't send ~a command when not connected to server." cmd)))
   (match-define (redis-connection in out) rconn)
   (write-bytes (mk-request cmd args) out)
   (flush-output out)
   ;; must catch and re-throw here to display offending cmd and args
   (with-handlers ([exn:fail?
                    (lambda (x)
-                     (raise (exn:fail:redis
-                             (format "~a\nCMD: ~a\nARGS: ~a\n"
-                                     (exn-message x) cmd args)
-                             (current-continuation-marks))))])
+                     (redis-error (format "~a\nCMD: ~a\nARGS: ~a\n"
+                                          (exn-message x) cmd args)))])
     (get-reply in)))
 
 (define (mk-request cmd args)
@@ -53,8 +61,6 @@
    (arg->bytes cmd)
    (apply bytes-append (map arg->bytes args))))
 
-;(define (number->bytes n) (string->bytes/utf-8 (number->string n)))
-;(define (symbol->bytes x) (string->bytes/utf-8 (symbol->string x)))
 (define (arg->bytes val)
   (define bs
     (cond [(bytes? val) val]

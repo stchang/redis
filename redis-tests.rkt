@@ -1,23 +1,11 @@
 #lang racket
-(require "redis.rkt"
-         "redis-cmds.rkt"
-         "bytes-utils.rkt")
+(require "redis.rkt" "redis-cmds.rkt"
+         "bytes-utils.rkt" "test-utils.rkt")
 (require rackunit data/heap)
 
-
-;(current-redis-connection (connect))
-
-(define-syntax-rule (test tst ...)
-  (parameterize ([current-redis-connection (connect)])
-    (let* ([keys (KEYS "*")]
-           [old (map (lambda (x) (DUMP x)) keys)])
-      (for-each (lambda (x) (check-equal? (DEL x) 1)) keys)
-      tst ...
-      (for-each (lambda (k v) (DEL k) (RESTORE k 0 v)) keys old))
-    (disconnect)))
-(define-syntax-rule (check-redis-exn e) (check-exn exn:fail:redis? (lambda () e)))
-(define-syntax-rule (check-set-equal? e (x ...))
-  (check-equal? (list->set e) (set x ...)))
+;; disconnected exn
+(check-redis-exn (SET "x" 100))
+(check-redis-exn (disconnect))
 
 ; test GET, SET, EXISTS, DEL, APPEND, etc
 (test
@@ -569,5 +557,3 @@
  (check-equal? (PING) "PONG")
  (check-equal? (length (TIME)) 2)
  (check-equal? (car (TIME)) (car (TIME))))
-
-;(disconnect)
