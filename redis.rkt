@@ -40,7 +40,7 @@
 (define-syntax-rule (with-redis-connection e ...)
   (let ([rconn (connect)])
     (parameterize ([current-redis-connection rconn])
-      (define res (begin e ...))
+      (define res (let () e ...))
       (disconnect)
       res)))
 
