@@ -74,9 +74,13 @@
   (let loop ([lst (HGETALL #:rconn rconn key)] [h (hash)])
     (if (null? lst) h 
         (loop (cddr lst) (hash-set h (fkey (car lst)) (fval (cadr lst)))))))
-(define (SET/hash #:rconn [rconn (current-redis-connection)] key h)
-  (DEL #:rconn rconn key)
-  (for ([(k v) (in-hash h)]) (HSET #:rconn rconn key k v)))
+(define (SET/hash #:rconn [conn (current-redis-connection)] key h)
+  (define rconn (or conn (connect)))
+  (parameterize ([current-redis-connection rconn])
+    (do-MULTI
+     (DEL key)
+     (for ([(k v) (in-hash h)]) (send-cmd 'HSET key k v))))
+  (unless conn (disconnect rconn)))
 (define (SET/heap #:rconn [rconn (current-redis-connection)] key h)
   (for ([(k v) (in-hash h)]) (ZADD #:rconn rconn key v k)))
 (define (GET/heap #:rconn [rconn (current-redis-connection)] key
