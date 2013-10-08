@@ -13,7 +13,7 @@
 
 (require "bytes-utils.rkt")
 (provide connect disconnect send-cmd current-redis-connection
-         exn:fail:redis? get-reply)
+         exn:fail:redis? get-reply with-redis-connection)
 
 ;; connect/disconnect ---------------------------------------------------------
 (struct redis-connection (in out))
@@ -37,13 +37,18 @@
   (send-cmd #:rconn rconn "QUIT")
   (close-input-port in) (close-output-port out))
 
+(define-syntax-rule (with-redis-connection e ...)
+  (let ([rconn (connect)])
+    (parameterize ([current-redis-connection rconn])
+      (define res (begin e ...))
+      (disconnect)
+      res)))
+
 ;; send cmd/recv reply --------------------------------------------------------
 (define CRLF #"\r\n")
 
-(define (send-cmd #:rconn [rconn (current-redis-connection)] cmd . args)
-  (unless rconn
-    (redis-error
-     (format "Can't send ~a command when not connected to server." cmd)))
+(define (send-cmd #:rconn [conn (current-redis-connection)] cmd . args)
+  (define rconn (or conn (connect)))
   (match-define (redis-connection in out) rconn)
   (write-bytes (mk-request cmd args) out)
   (flush-output out)
@@ -52,7 +57,7 @@
                    (lambda (x)
                      (redis-error (format "~a\nCMD: ~a\nARGS: ~a\n"
                                           (exn-message x) cmd args)))])
-    (get-reply in)))
+    (begin0 (get-reply in) (unless conn (disconnect rconn)))))
 
 (define (mk-request cmd args)
   (bytes-append

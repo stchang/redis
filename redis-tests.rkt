@@ -4,7 +4,7 @@
 (require rackunit data/heap)
 
 ;; disconnected exn
-(check-redis-exn (SET "x" 100))
+(check-true (SET "x" 100)) ;; should auto-connect
 (check-redis-exn (disconnect))
 
 ; test GET, SET, EXISTS, DEL, APPEND, etc
@@ -41,8 +41,9 @@
   (check-equal? (GET/str "z") "red")
   (sleep 1.5)
   (check-false (GET/str "z"))
-  (check-true (SET "z" "blue" "PX" 1))
-  (check-equal? (GET/str "z") "blue")
+  (check-equal? (do-MULTI (SET "z" "blue" "PX" 1)
+                          (GET "z") "blue")
+                (list "OK" #"blue"))
   (sleep .1)
   (check-false (GET/str "z"))
   (check-false (EXISTS "z"))
