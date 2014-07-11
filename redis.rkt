@@ -14,7 +14,8 @@
 (require "bytes-utils.rkt"
          racket/tcp
          racket/match
-         racket/async-channel)
+         racket/async-channel
+         racket/contract)
 (provide connect disconnect send-cmd current-redis-connection
          exn:fail:redis? get-reply with-redis-connection redis-connection?
          make-connection-pool kill-connection-pool)
@@ -22,7 +23,9 @@
 ;; connect/disconnect ---------------------------------------------------------
 (struct redis-connection ())
 (struct redis-connection-single redis-connection (in out pool [owner #:mutable]))
-(struct redis-connection-pool redis-connection (host port [dead? #:mutable] key=>conn idle-conns fresh-conn-sema manager-thread))
+(struct redis-connection-pool redis-connection
+  (host port [dead? #:mutable] key=>conn
+        idle-conns fresh-conn-sema manager-thread))
 
 (define current-redis-connection (make-parameter #f))
 
@@ -32,7 +35,44 @@
   (raise (exn:fail:redis (string-append "redis ERROR: " msg)
                          (current-continuation-marks))))
 
-(define (make-connection-pool #:host [host "127.0.0.1"] #:port [port 6379] #:max-connections [max-conn 100] #:max-idle [max-idle 10])
+;; Construct a redis-connection-pool that will lease at most max-connections
+;; to client threads and will maintain at most max-idle unleased connections.
+;;
+;; A connection pool will lease a connection to a client thread when (connect)
+;; is called on the pool. Further calls to (connect) on the same connection pool
+;; and in the same thread, with no intervening calls to (disconnect), will
+;; produce the same connection. No other thread will be able to use the
+;; connection until it is returned to the pool.
+;;
+;; Leased connections are explicitly returned to the pool of available
+;; connections when (disconnect) is called on the connection pool whence
+;; the connection was leased or on the leased connection itself. Leased
+;; connections are also returned to the pool when the leasing thread dies.
+;;
+;; Calling any command on a connection that is not leased to the current thread
+;; will raise an exception. Attepting to lease a connection when there are no
+;; available connections in the pool will block until a connection is available.
+;;
+;; A connection pool can be killed with kill-connection-pool. Killing a
+;; connection pool causes it to lease no further connections, close all idle
+;; connections, and immediately close any connection that is returned to the
+;; pool. Attempting to lease from a dead connection pool will result in an
+;; exception. Threads that were blocked on leasing a connection from a
+;; connection pool that was killed will block forever.
+(define/contract
+  (make-connection-pool #:host [host "127.0.0.1"]
+                        #:port [port 6379]
+                        #:max-connections [max-conn 100]
+                        #:max-idle [max-idle 10])
+  (->* () (#:host
+           string?
+           #:port
+           exact-nonnegative-integer?
+           #:max-connections
+           exact-nonnegative-integer?
+           #:max-idle
+           exact-nonnegative-integer?)
+       redis-connection-pool?)
   (define idle-return-chan (make-async-channel max-idle))
   (define key=>conn (make-hasheq))
   (define fresh-conn-sema (make-semaphore max-conn))
@@ -43,6 +83,7 @@
     (if dead?
         (disconnect conn)
         (begin
+          ;; Reset state of returned connection.
           (send-cmd #:rconn conn "UNSUBSCRIBE")
           (send-cmd #:rconn conn "UNWATCH")
           (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
@@ -62,21 +103,22 @@
             (lambda(thd.conn)
               (release-conn thd.conn (redis-connection-pool-dead? pool))
               (loop)))
-           (handle-evt (thread-receive-evt)
-                       (lambda(_)
-                         (match (thread-receive)
-                           ['die
-                            (set-redis-connection-pool-dead?! pool #t)
-                            (let dis-loop ()
-                              (let ([maybe-idle-conn (async-channel-try-get idle-return-chan)])
-                                (when maybe-idle-conn
-                                  (disconnect maybe-idle-conn)
-                                  (dis-loop))))
-                            (loop)]
-                           ['new (loop)]
-                           [thd.conn
-                            (release-conn thd.conn (redis-connection-pool-dead? pool))
-                            (loop)])))))))))
+           (handle-evt
+            (thread-receive-evt)
+            (lambda(_)
+              (match (thread-receive)
+                ['die
+                 (set-redis-connection-pool-dead?! pool #t)
+                 (let dis-loop ()
+                   (let ([maybe-idle-conn (async-channel-try-get idle-return-chan)])
+                     (when maybe-idle-conn
+                       (disconnect maybe-idle-conn)
+                       (dis-loop))))
+                 (loop)]
+                ['new (loop)]
+                [thd.conn
+                 (release-conn thd.conn (redis-connection-pool-dead? pool))
+                 (loop)])))))))))
   pool)
 
 (define (kill-connection-pool pool)
@@ -107,7 +149,8 @@
   (thread-send (redis-connection-pool-manager-thread pool)
                (cons (current-thread) conn)))
 
-(define (connect #:host [host "127.0.0.1"] #:port [port 6379])
+(define/contract (connect #:host [host "127.0.0.1"] #:port [port 6379])
+  (->* () (#:host string? #:port exact-nonnegative-integer?) redis-connection?)
   (let ([rconn (current-redis-connection)])
     (if (and (redis-connection-pool? rconn)
              (string=? (redis-connection-pool-host rconn) host)
@@ -119,7 +162,8 @@
   (let-values ([(in out) (tcp-connect host port)])
     (redis-connection-single in out pool (current-thread))))
 
-(define (disconnect [rconn (current-redis-connection)])
+(define/contract (disconnect [rconn (current-redis-connection)])
+  (->* () (redis-connection?) void?)
   (match rconn
     [#f (redis-error "Can't disconnect when not connected to server.")]
     [(redis-connection-single _ _ (? redis-connection-pool? pool) _)
