@@ -24,9 +24,10 @@
   (defcmd c #:return (lambda (reply) (and (not (eq? #\null reply)) reply))))
 (define-syntax-rule (defcmds/chknil c ...) (begin (defcmd/chknil c) ...))
 (define-syntax-rule (defcmd/ok c)
-  (defcmd c #:return (lambda (reply) (string=? "OK" reply))))
+  (defcmd c #:return (lambda (reply) (or (string=? "OK" reply) (string=? "QUEUED" reply)))))
 (define-syntax-rule (defcmds/ok c ...) (begin (defcmd/ok c) ...))
-(define-syntax-rule (defcmd/01 c) (defcmd c #:return (o not zero?)))
+(define-syntax-rule (defcmd/01 c)
+  (defcmd c #:return (lambda(reply) (not (and (number? reply) (zero? reply))))))
 (define-syntax-rule (defcmds/01 c ...) (begin (defcmd/01 c) ...))
 
 ;; basic operations, ie get and set
