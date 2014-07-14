@@ -82,7 +82,7 @@
   ;; do tests  
   (newline)
   (printf "Running tests ..........\n")
-              
+         
 ;; disconnected exn
 (check-true (SET "x" 100)) ;; should auto-connect
 (check-redis-exn (disconnect))
@@ -248,18 +248,20 @@
   (check-false (BRPOPLPUSH "lst-non-exist" "lst" 1))
 
   (define achan (make-async-channel))
-  (thread (lambda () (async-channel-put achan (BRPOP "lst" 0))))
-  (parameterize ([current-redis-connection (connect)])
-    (check-equal? (RPUSH "lst" "aaa") 1) (disconnect))
+  ;; #f = make new single connection, instead of using pool
+  (parameterize ([current-redis-connection #f]) 
+    (thread (lambda () (async-channel-put achan (BRPOP "lst" 0)))))
+  (check-equal? (RPUSH "lst" "aaa") 1)
   (check-equal? (async-channel-get achan) (list #"lst" #"aaa"))
-  (thread (lambda () (async-channel-put achan (BLPOP "lst" 0))))
-  (parameterize ([current-redis-connection (connect)])
-    (check-equal? (RPUSH "lst" "bbb") 1) (disconnect))
+  (parameterize ([current-redis-connection #f])
+    (thread (lambda () (async-channel-put achan (BLPOP "lst" 0)))))
+  (check-equal? (RPUSH "lst" "bbb") 1)
   (check-equal? (async-channel-get achan) (list #"lst" #"bbb"))
-  (thread (lambda () (async-channel-put achan (BRPOPLPUSH "lst" "lst2" 0))))
-  (parameterize ([current-redis-connection (connect)])
-    (check-equal? (RPUSH "lst" "ccc") 1) (disconnect))
-  (check-equal? (async-channel-get achan) #"ccc"))
+  (parameterize ([current-redis-connection #f])
+    (thread (lambda () (async-channel-put achan (BRPOPLPUSH "lst" "lst2" 0)))))
+  (check-equal? (RPUSH "lst" "ccc") 1)
+  (check-equal? (async-channel-get achan) #"ccc")
+  )
 
 (test
   (check-equal? (SET/list "lst" (list 1 2 3)) 3)
@@ -413,26 +415,28 @@
 ;; pub/sub
 (test
   ;; sub/unsub
-  (check-equal? (SUBSCRIBE 'foo 'bar) (list #"subscribe" #"foo" 1))
-  (check-equal? (get-reply) (list #"subscribe" #"bar" 2))
-  (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 3))
-  (define achan (make-async-channel))
-  (thread (lambda () (async-channel-put achan (get-reply))))
-  (parameterize ([current-redis-connection (connect)])
-    (PUBLISH 'foo "Hello") (disconnect))
-  (check-equal? (async-channel-get achan) (list #"message" #"foo" #"Hello"))
-  (check-equal? (UNSUBSCRIBE 'foo) (list #"unsubscribe" #"foo" 2))
-  (check-equal? (UNSUBSCRIBE) (list #"unsubscribe" #"bar" 1))
-  ;; psub/punsub
-  ; (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 1))
-  (thread (lambda () (async-channel-put achan (get-reply))))
-  (parameterize ([current-redis-connection (connect)])
-    (PUBLISH 'news.art "Pello") (disconnect))
-  (check-equal? (async-channel-get achan)
-                (list #"pmessage" #"news.*" #"news.art" #"Pello"))
-  (check-equal? (PUNSUBSCRIBE "news.*") (list #"punsubscribe" #"news.*" 0))
-  ;; PUBSUB cmd only available in redis version >= 2.8
-  )
+ (parameterize ([current-redis-connection #f]) ; drop the pool
+   (parameterize ([current-redis-connection (connect)]) ; single
+     (check-equal? (SUBSCRIBE 'foo 'bar) (list #"subscribe" #"foo" 1))
+     (check-equal? (get-reply) (list #"subscribe" #"bar" 2))
+     (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 3))
+     (define achan (make-async-channel))
+     (thread (lambda () (async-channel-put achan (get-reply))))
+     (parameterize ([current-redis-connection (connect)])
+       (PUBLISH 'foo "Hello"))
+     (check-equal? (async-channel-get achan) (list #"message" #"foo" #"Hello"))
+     (check-equal? (UNSUBSCRIBE 'foo) (list #"unsubscribe" #"foo" 2))
+     (check-equal? (UNSUBSCRIBE) (list #"unsubscribe" #"bar" 1))
+     ;; psub/punsub
+     ;; (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 1))
+     (thread (lambda () (async-channel-put achan (get-reply))))
+     (parameterize ([current-redis-connection (connect)])
+       (PUBLISH 'news.art "Pello"))
+     (check-equal? (async-channel-get achan)
+                   (list #"pmessage" #"news.*" #"news.art" #"Pello"))
+     (check-equal? (PUNSUBSCRIBE "news.*") (list #"punsubscribe" #"news.*" 0))
+     ;; PUBSUB cmd only available in redis version >= 2.8
+  )))
 
 ; random key
 (test
