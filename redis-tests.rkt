@@ -1,8 +1,88 @@
 #lang racket
 (require "redis.rkt" "redis-cmds.rkt"
          "bytes-utils.rkt" "test-utils.rkt")
-(require rackunit data/heap)
+(require rackunit data/heap racket/async-channel ffi/unsafe/custodian)
 
+(module+ main (displayln "Run tests with \"raco test redis-tests.rkt\"."))
+
+(module+ test
+  
+  (printf
+    (~a "\n"
+      "WARNING:\n"
+      "  Running these tests temporarily deletes keys from the db (but later "
+      "restores them). The current keys are saved to disk before testing "
+      "begins. If the tests are interrupted, you should probably manually "
+      "restore the keys from disk.\n\n"
+      "The tests also change the redis parameters \"dir\" and \"dbfilename\". "
+      "The current parameters are saved before the tests begin "
+      "and restored at the end of the tests, or if the user prematurely "
+      "terminates the tests. If the tests are interrupted though, you should "
+      "check that the parameters were actually restored.\n\n"
+      "Continue with the tests? (enter 'y'): "))
+  
+  (define y (read))
+
+  (when (eq? 'y y)
+  
+  ;; save keys to disk
+  (newline)
+  (printf "Saving keys to disk ..........\n")
+  (send-cmd 'save)
+  
+  ;; need to organize custodians so I still have a connection                 
+  ;; to the redis db, to restore parameters in case of shutdown                
+  (define restore-cust (make-custodian))
+  (define redis-conn-cust (make-custodian restore-cust))
+  (define shutdown-rconn
+    (parameterize ([current-custodian redis-conn-cust]) (connect)))
+  
+  (define rdb-dir
+    (bytes->string/utf-8 (second (send-cmd 'config 'get 'dir))))
+  (define rdb-file
+    (bytes->string/utf-8 (second (send-cmd 'config 'get 'dbfilename))))
+  (newline)
+  (printf "Saving current parameters: ..........\n")
+  (printf "current \"dir\": ~a\n" rdb-dir)
+  (printf "current \"dbfilename\": ~a\n" rdb-file)
+  ;; /var/lib/redis/6379/dump.rdb
+  (define rdb-path (build-path rdb-dir rdb-file))
+  
+  ;; restore old params in case of premature exit 
+  (define dir+file (list rdb-dir rdb-file))
+  (define cust-reg  
+    (register-custodian-shutdown dir+file
+      (λ (dir+file)
+        (define dir (first dir+file))
+        (define file (second dir+file))
+        (printf "Premature exit. Restoring old parameters: ..........\n")
+        (printf "- restoring \"dir\" to: ~a\n" dir)
+        (send-cmd #:rconn shutdown-rconn 'config 'set 'dir dir)
+        (printf "- restoring \"dbfilename\" to: ~a\n" file)
+        (send-cmd #:rconn shutdown-rconn 'config 'set 'dbfilename file))
+      restore-cust #:at-exit? #t))
+  
+  (define current-dir (path->string (current-directory)))
+  (define tmp-rdb-file "tmp.rdb")
+  (define backup-path (build-path current-dir (~a rdb-file ".bak")))
+  
+  (newline)
+  ;; backup rdb file 
+  (printf "Backing up rdb file: ..........\n- from: ~a\n- to: ~a\n"
+    rdb-path backup-path)
+  (copy-file rdb-path backup-path #t)
+                     
+  (newline)
+  ;; set tmp rdb file    
+  (printf "Setting tmp dir: ~a\n" current-dir)
+  (send-cmd 'config 'set 'dir current-dir)
+  (printf "Setting tmp rdb file: ~a\n" tmp-rdb-file)
+  (send-cmd 'config 'set 'dbfilename tmp-rdb-file)
+  
+  ;; do tests  
+  (newline)
+  (printf "Running tests ..........\n")
+              
 ;; disconnected exn
 (check-true (SET "x" 100)) ;; should auto-connect
 (check-redis-exn (disconnect))
@@ -89,7 +169,6 @@
   (check-equal? (XOR "hep" "hip" "hop") 1)
   (check-equal? (GETBIT "hep" 0) 0))
 
-(require racket/async-channel)
 ;; test list commands
 (test
   (check-equal? (LPUSH "lst" "world") 1)
@@ -558,3 +637,13 @@
  (check-equal? (PING) "PONG")
  (check-equal? (length (TIME)) 2)
  (check-equal? (car (TIME)) (car (TIME))))
+
+  ;; restore old config parameters 
+  (newline)
+  (printf "Tests done. Restoring old parameters: ..........\n")
+  (printf "- restoring \"dir\" to: ~a\n" rdb-dir)
+  (send-cmd 'config 'set 'dir rdb-dir)
+  (printf "- restoring \"dbfilename\" to: ~a\n" rdb-file)
+  (send-cmd 'config 'set 'dbfilename rdb-file)
+  (unregister-custodian-shutdown dir+file cust-reg)
+))
