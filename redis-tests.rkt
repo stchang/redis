@@ -9,17 +9,19 @@
   
   (printf
     (~a "\n"
-      "WARNING:\n"
-      "  Running these tests temporarily deletes keys from the db (but later "
-      "restores them). The current keys are saved to disk before testing "
-      "begins. If the tests are interrupted, you should probably manually "
-      "restore the keys from disk.\n\n"
-      "The tests also change the redis parameters \"dir\" and \"dbfilename\". "
-      "The current parameters are saved before the tests begin "
-      "and restored at the end of the tests, or if the user prematurely "
-      "terminates the tests. If the tests are interrupted though, you should "
-      "check that the parameters were actually restored.\n\n"
-      "Continue with the tests? (enter 'y'): "))
+      "*WARNING*: Interrupting these tests will result in data loss.\n"
+      "  Running these tests (temporarily) deletes keys from the db. The keys "
+      "are restored when the tests conclude but if the tests are interrupted, "
+      "the keys won't get restored, meaning you'll lose data. The current "
+      "keys are saved to disk before testing begins so if the tests get "
+      "interrupted, you should manually restore the keys from disk.\n"
+      "  The tests also change the redis parameters \"dir\" and "
+      "\"dbfilename\". The current parameters are similarly saved before the "
+      "tests begin and restored at the end of the tests. The tests try to "
+      "restore these parameters if the tests are interrupted, but I don't "
+      "know how well this works, so in the event of early termination, you "
+      "should check that the parameters were actually restored.\n\n"
+      "Continue with the tests? (enter 'y' to continue): "))
   
   (define y (read))
 
@@ -427,9 +429,22 @@
      (parameterize ([current-redis-connection (connect)])
        (PUBLISH 'foo "Hello")) ; publish with new connection
      (check-equal? (async-channel-get achan) (list #"message" #"foo" #"Hello"))
+     (parameterize ([current-redis-connection (connect)])
+       (PUBLISH 'foo "Kello")) ; publish with new connection
+     (check-equal? (sync (get-reply-evt)) (list #"message" #"foo" #"Kello"))
+     ;; test for the bug fixed by m4burns, where a SUBSCRIBE
+     ;; followed by a get-reply can accidentally read a message from another
+     ;; subscribe instead of the SUBSCRIBE cmd reply msg
+     (parameterize ([current-redis-connection (connect)])
+       (PUBLISH 'foo "Jello")) ; publish with new connection
+     (check-void? (SUBSCRIBE 'goo))
+     (check-equal? (get-reply) (list #"message" #"foo" #"Jello"))
+     (check-equal? (get-reply) (list #"subscribe" #"goo" 4))
+     ;; test unsubscribe
      (check-void? (UNSUBSCRIBE 'foo))
-     (check-equal? (get-reply) (list #"unsubscribe" #"foo" 2))
+     (check-equal? (get-reply) (list #"unsubscribe" #"foo" 3))
      (check-void? (UNSUBSCRIBE))
+     (check-equal? (get-reply) (list #"unsubscribe" #"goo" 2))
      (check-equal? (get-reply) (list #"unsubscribe" #"bar" 1))
      ;; psub/punsub
      ;; (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 1))
