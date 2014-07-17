@@ -16,10 +16,9 @@
          racket/match
          racket/async-channel
          racket/contract)
-(provide (all-defined-out))
-#;(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
-         exn:fail:redis? get-reply get-reply-evt with-redis-connection redis-connection?
-         make-connection-pool kill-connection-pool)
+(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
+         exn:fail:redis? get-reply get-reply-evt with-redis-connection 
+         redis-connection? make-connection-pool kill-connection-pool)
 
 ;; connect/disconnect ---------------------------------------------------------
 (struct redis-connection ())
@@ -29,6 +28,7 @@
         idle-conns fresh-conn-sema manager-thread))
 
 (define current-redis-connection (make-parameter #f))
+(define current-redis-pool (make-parameter #f))
 
 (struct exn:fail:redis exn:fail ())
 
@@ -126,6 +126,7 @@
                 [thd.conn
                  (release-conn thd.conn (redis-connection-pool-dead? pool))
                  (loop)])))))))))
+  (current-redis-pool pool)
   pool)
 
 (define (kill-connection-pool pool)
@@ -156,7 +157,7 @@
   (thread-send (redis-connection-pool-manager-thread pool)
                (cons (current-thread) conn)))
 
-(define/contract (connect #:host [host "127.0.0.1"] #:port [port 6379])
+#;(define/contract (connect #:host [host "127.0.0.1"] #:port [port 6379])
   (->* () (#:host string? #:port exact-nonnegative-integer?) redis-connection?)
   (let ([rconn (current-redis-connection)])
     (if (and (redis-connection-pool? rconn)
@@ -165,11 +166,11 @@
         (connection-pool-lease rconn)
         (real-connect host port #f))))
 
-(define (real-connect host port pool)
+#;(define (real-connect host port pool)
   (let-values ([(in out) (tcp-connect host port)])
     (redis-connection-single in out pool (current-thread))))
 
-(define/contract (disconnect [rconn (current-redis-connection)])
+#;(define/contract (disconnect [rconn (current-redis-connection)])
   (->* () (redis-connection?) void?)
   (match rconn
     [#f (redis-error "Can't disconnect when not connected to server.")]
@@ -183,7 +184,7 @@
        (when (and maybe-connection (eq? (current-thread) (redis-connection-single-owner maybe-connection)))
          (connection-pool-return rconn maybe-connection)))]))
 
-(define-syntax-rule (with-redis-connection e0 e ...)
+#;(define-syntax-rule (with-redis-connection e0 e ...)
   (let ([rconn (connect)])
     (parameterize ([current-redis-connection rconn])
       (dynamic-wind
@@ -202,11 +203,21 @@
   (write-bytes (mk-request cmd args) out)
   (flush-output out))
 
-(define (send-cmd #:rconn [conn (current-redis-connection)] cmd . args)
-  (define rconn (if (redis-connection-single? conn) conn (connect)))
+(define (send-cmd #:rconn [conn #f] 
+                  #:host [host "127.0.0.1"] 
+                  #:port [port 6379] 
+                  cmd . args)
+  (define rconn 
+    (or conn 
+        (connection-pool-lease
+          (or (current-redis-pool) 
+              (let ([new-pool (make-connection-pool #:host host #:port port)])
+                (current-redis-pool new-pool)
+                new-pool)))))
   (match-define (redis-connection-single in out _ owner) rconn)
   (unless (eq? (current-thread) owner)
-    (redis-error "Attempted to use redis connection in thread other than owner."))
+    (redis-error 
+        "Attempted to use redis connection in thread other than owner."))
   (write-bytes (mk-request cmd args) out)
   (flush-output out)
   ;; must catch and re-throw here to display offending cmd and args
@@ -214,7 +225,9 @@
                    (lambda (x)
                      (redis-error (format "~a\nCMD: ~a\nARGS: ~a\n"
                                           (exn-message x) cmd args)))])
-    (begin0 (get-reply in) (unless conn (disconnect rconn)))))
+    (begin0 
+     (get-reply in) 
+     (unless conn (connection-pool-return (current-redis-pool) rconn)))))
 
 (define (mk-request cmd args)
   (bytes-append
@@ -233,7 +246,7 @@
   (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF bs CRLF))
 
 ;; cmd and args are used for error reporting
-(define (get-reply [in (redis-connection-single-in (current-redis-connection))])
+(define (get-reply in)
   (define byte1 (read-char in))
   (define reply1 (read-line in 'return-linefeed))
   (match byte1
