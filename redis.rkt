@@ -16,14 +16,14 @@
          racket/match
          racket/async-channel
          racket/contract)
-(provide (all-defined-out))
-#;(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
-         exn:fail:redis? get-reply get-reply-evt with-redis-connection redis-connection?
-         make-connection-pool kill-connection-pool)
+(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
+         exn:fail:redis? get-reply get-reply-evt with-redis-connection 
+         redis-connection? make-connection-pool kill-connection-pool)
 
 ;; connect/disconnect ---------------------------------------------------------
 (struct redis-connection ())
-(struct redis-connection-single redis-connection (in out pool [owner #:mutable]))
+(struct redis-connection-single redis-connection 
+        (in out pool [owner #:mutable]))
 (struct redis-connection-pool redis-connection
   (host port [dead? #:mutable] key=>conn
         idle-conns fresh-conn-sema manager-thread))
