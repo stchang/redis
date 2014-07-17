@@ -16,8 +16,8 @@
 (define-syntax (defcmd stx)
   (syntax-parse stx
     [(_ CMD (~optional (~seq #:return fn)))
-     #:with res #'(apply send-cmd #:rconn rconn 'CMD args) 
-     #`(define (CMD #:rconn [rconn (current-redis-connection)] . args)
+     #:with res #'(apply send-cmd #:rconn rconn #:host host #:port port 'CMD args) 
+     #`(define (CMD #:rconn [rconn #f] #:host [host "127.0.0.1"] #:port [port 6379] . args)
          #,(if (attribute fn) #'(fn res) #'res))]))
 (define-syntax-rule (defcmds c ...) (begin (defcmd c) ...))
 (define-syntax-rule (defcmd/chknil c)
