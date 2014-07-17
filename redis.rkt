@@ -16,7 +16,8 @@
          racket/match
          racket/async-channel
          racket/contract)
-(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
+(provide (all-defined-out))
+#;(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
          exn:fail:redis? get-reply get-reply-evt with-redis-connection redis-connection?
          make-connection-pool kill-connection-pool)
 

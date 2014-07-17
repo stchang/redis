@@ -417,16 +417,20 @@
   ;; sub/unsub
  (parameterize ([current-redis-connection #f]) ; drop the pool
    (parameterize ([current-redis-connection (connect)]) ; single
-     (check-equal? (SUBSCRIBE 'foo 'bar) (list #"subscribe" #"foo" 1))
+     (check-void? (SUBSCRIBE 'foo 'bar))
+     (check-equal? (get-reply) (list #"subscribe" #"foo" 1))
      (check-equal? (get-reply) (list #"subscribe" #"bar" 2))
-     (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 3))
+     (check-void? (PSUBSCRIBE "news.*"))
+     (check-equal? (get-reply) (list #"psubscribe" #"news.*" 3))
      (define achan (make-async-channel))
      (thread (lambda () (async-channel-put achan (get-reply))))
      (parameterize ([current-redis-connection (connect)])
-       (PUBLISH 'foo "Hello"))
+       (PUBLISH 'foo "Hello")) ; publish with new connection
      (check-equal? (async-channel-get achan) (list #"message" #"foo" #"Hello"))
-     (check-equal? (UNSUBSCRIBE 'foo) (list #"unsubscribe" #"foo" 2))
-     (check-equal? (UNSUBSCRIBE) (list #"unsubscribe" #"bar" 1))
+     (check-void? (UNSUBSCRIBE 'foo))
+     (check-equal? (get-reply) (list #"unsubscribe" #"foo" 2))
+     (check-void? (UNSUBSCRIBE))
+     (check-equal? (get-reply) (list #"unsubscribe" #"bar" 1))
      ;; psub/punsub
      ;; (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 1))
      (thread (lambda () (async-channel-put achan (get-reply))))
@@ -434,7 +438,8 @@
        (PUBLISH 'news.art "Pello"))
      (check-equal? (async-channel-get achan)
                    (list #"pmessage" #"news.*" #"news.art" #"Pello"))
-     (check-equal? (PUNSUBSCRIBE "news.*") (list #"punsubscribe" #"news.*" 0))
+     (check-void? (PUNSUBSCRIBE "news.*"))
+     (check-equal? (get-reply) (list #"punsubscribe" #"news.*" 0))
      ;; PUBSUB cmd only available in redis version >= 2.8
   )))
 

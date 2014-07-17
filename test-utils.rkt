@@ -17,3 +17,5 @@
 
 (define-syntax-rule (check-set-equal? e (x ...))
   (check-equal? (list->set e) (set x ...)))
+
+(define-syntax-rule (check-void? e) (check-equal? e (void)))
