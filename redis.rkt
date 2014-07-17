@@ -199,7 +199,8 @@
   (define rconn (if (redis-connection-single? conn) conn (connect)))
   (match-define (redis-connection-single in out _ owner) rconn)
   (unless (eq? (current-thread) owner)
-    (redis-error "Attempted to use redis connection in thread other than owner."))
+    (redis-error 
+        "Attempted to use redis connection in thread other than owner."))
   (write-bytes (mk-request cmd args) out)
   (flush-output out))
 
