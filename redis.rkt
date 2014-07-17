@@ -92,7 +92,8 @@
               (loop)))
           (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
             (disconnect conn)
-            (semaphore-post fresh-conn-sema)))))
+            (semaphore-post fresh-conn-sema))))
+    (set-redis-connection-single-owner! conn #f))
   (define pool
     (redis-connection-pool
      host port #f key=>conn idle-return-chan fresh-conn-sema
@@ -105,7 +106,8 @@
                    (map (lambda(thd.conn) (wrap-evt (thread-dead-evt (car thd.conn)) (lambda(_) thd.conn)))
                         (hash->list key=>conn)))
             (lambda(thd.conn)
-              (release-conn thd.conn (redis-connection-pool-dead? pool))
+              (when (redis-connection-single-owner (cdr thd.conn))
+                (release-conn thd.conn (redis-connection-pool-dead? pool)))
               (loop)))
            (handle-evt
             (thread-receive-evt)
