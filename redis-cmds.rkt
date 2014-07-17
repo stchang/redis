@@ -15,11 +15,16 @@
 
 (define-syntax (defcmd stx)
   (syntax-parse stx
-    [(_ CMD (~optional (~seq #:return fn)))
-     #:with res #'(apply send-cmd #:rconn rconn 'CMD args) 
+    [(_ CMD (~optional (~seq #:return fn)) (~optional (~seq #:no-reply nr)))
+     #:with res #`(apply #,(if (attribute nr)
+                               #'(if nr send-cmd/no-reply send-cmd)
+                               #'send-cmd)
+                         #:rconn rconn 'CMD args)
      #`(define (CMD #:rconn [rconn (current-redis-connection)] . args)
          #,(if (attribute fn) #'(fn res) #'res))]))
 (define-syntax-rule (defcmds c ...) (begin (defcmd c) ...))
+(define-syntax-rule (defcmd/nr c) (defcmd c #:no-reply #t))
+(define-syntax-rule (defcmds/nr c ...) (begin (defcmd/nr c) ...))
 (define-syntax-rule (defcmd/chknil c)
   (defcmd c #:return (lambda (reply) (and (not (eq? #\null reply)) reply))))
 (define-syntax-rule (defcmds/chknil c ...) (begin (defcmd/chknil c) ...))
@@ -156,7 +161,8 @@
 
 ;; pubsub
 ; (defcmd PUBSUB) ; only available in redis >= v2.8
-(defcmds PUBLISH SUBSCRIBE UNSUBSCRIBE PSUBSCRIBE PUNSUBSCRIBE)
+(defcmds/nr SUBSCRIBE UNSUBSCRIBE PSUBSCRIBE PUNSUBSCRIBE)
+(defcmd PUBLISH)
 
 ;; administrative commands
 ;; BGREWRITEAOF BGSAVE INFO LASTSAVE MIGRATE MONITOR MOVE SAVE SHUTDOWN

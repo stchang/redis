@@ -16,8 +16,8 @@
          racket/match
          racket/async-channel
          racket/contract)
-(provide connect disconnect send-cmd current-redis-connection
-         exn:fail:redis? get-reply with-redis-connection redis-connection?
+(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
+         exn:fail:redis? get-reply get-reply-evt with-redis-connection redis-connection?
          make-connection-pool kill-connection-pool)
 
 ;; connect/disconnect ---------------------------------------------------------
@@ -84,11 +84,16 @@
         (disconnect conn)
         (begin
           ;; Reset state of returned connection.
-          (send-cmd #:rconn conn "UNSUBSCRIBE")
-          (send-cmd #:rconn conn "UNWATCH")
+          (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
+          (send-cmd/no-reply #:rconn conn "UNWATCH")
+          (send-cmd/no-reply #:rconn conn "ECHO" #"i-am-reset")
+          (let loop ()
+            (unless (equal? (get-reply (redis-connection-single-in conn)) #"i-am-reset")
+              (loop)))
           (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
             (disconnect conn)
-            (semaphore-post fresh-conn-sema)))))
+            (semaphore-post fresh-conn-sema))))
+    (set-redis-connection-single-owner! conn #f))
   (define pool
     (redis-connection-pool
      host port #f key=>conn idle-return-chan fresh-conn-sema
@@ -101,7 +106,8 @@
                    (map (lambda(thd.conn) (wrap-evt (thread-dead-evt (car thd.conn)) (lambda(_) thd.conn)))
                         (hash->list key=>conn)))
             (lambda(thd.conn)
-              (release-conn thd.conn (redis-connection-pool-dead? pool))
+              (when (redis-connection-single-owner (cdr thd.conn))
+                (release-conn thd.conn (redis-connection-pool-dead? pool)))
               (loop)))
            (handle-evt
             (thread-receive-evt)
@@ -187,6 +193,14 @@
 ;; send cmd/recv reply --------------------------------------------------------
 (define CRLF #"\r\n")
 
+(define (send-cmd/no-reply #:rconn [conn (current-redis-connection)] cmd . args)
+  (define rconn (if (redis-connection-single? conn) conn (connect)))
+  (match-define (redis-connection-single in out _ owner) rconn)
+  (unless (eq? (current-thread) owner)
+    (redis-error "Attempted to use redis connection in thread other than owner."))
+  (write-bytes (mk-request cmd args) out)
+  (flush-output out))
+
 (define (send-cmd #:rconn [conn (current-redis-connection)] cmd . args)
   (define rconn (if (redis-connection-single? conn) conn (connect)))
   (match-define (redis-connection-single in out _ owner) rconn)
@@ -234,4 +248,5 @@
            (if (= numreplies -1) #\null
                (for/list ([n (in-range numreplies)]) (get-reply in))))]))
 
-
+(define (get-reply-evt [in (redis-connection-single-in (current-redis-connection))])
+  (wrap-evt in (lambda(_) (get-reply in))))
