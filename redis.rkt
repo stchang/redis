@@ -11,23 +11,18 @@
 ;;                 - makes it hard to use parameterize with (connect)
 ;;     DONE: 2013-09-26
 
-(require "bytes-utils.rkt"
-         racket/tcp
-         racket/match
-         racket/async-channel
-         racket/contract)
-(provide connect disconnect send-cmd send-cmd/no-reply current-redis-connection
+(require "bytes-utils.rkt" "constants.rkt"
+         racket/tcp racket/match racket/async-channel racket/contract)
+#;(provide connect disconnect send-cmd send-cmd/no-reply current-redis-pool
          exn:fail:redis? get-reply get-reply-evt with-redis-connection 
-         redis-connection? make-connection-pool kill-connection-pool)
+         redis-connect? make-connection-pool kill-connection-pool)
+(provide (all-defined-out))
 
 ;; connect/disconnect ---------------------------------------------------------
-(struct redis-connection ())
-(struct redis-connection-single redis-connection (in out pool [owner #:mutable]))
-(struct redis-connection-pool redis-connection
-  (host port [dead? #:mutable] key=>conn
-        idle-conns fresh-conn-sema manager-thread))
+(struct redis-connect (in out [owner #:mutable]))
+(struct redis-connection-pool (host port [dead? #:mutable] key=>conn 
+                               idle-conns fresh-conn-sema manager-thread))
 
-(define current-redis-connection (make-parameter #f))
 (define current-redis-pool (make-parameter #f))
 
 (struct exn:fail:redis exn:fail ())
@@ -61,8 +56,8 @@
 ;; exception. Threads that were blocked on leasing a connection from a
 ;; connection pool that was killed will block forever.
 (define/contract
-  (make-connection-pool #:host [host "127.0.0.1"]
-                        #:port [port 6379]
+  (make-connection-pool #:host [host LOCALHOST]
+                        #:port [port DEFAULT-REDIS-PORT]
                         #:max-connections [max-conn 100]
                         #:max-idle [max-idle 10])
   (->* () (#:host
@@ -79,7 +74,7 @@
   (define fresh-conn-sema (make-semaphore max-conn))
   (define (release-conn thd.conn dead?)
     (match-define (cons thd conn) thd.conn)
-    (set-redis-connection-single-owner! conn (current-thread))
+    (set-redis-connect-owner! conn (current-thread))
     (hash-remove! key=>conn thd)
     (if dead?
         (disconnect conn)
@@ -89,12 +84,12 @@
           (send-cmd/no-reply #:rconn conn "UNWATCH")
           (send-cmd/no-reply #:rconn conn "ECHO" #"i-am-reset")
           (let loop ()
-            (unless (equal? (get-reply (redis-connection-single-in conn)) #"i-am-reset")
+            (unless (equal? (get-reply (redis-connect-in conn)) #"i-am-reset")
               (loop)))
           (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
             (disconnect conn)
             (semaphore-post fresh-conn-sema))))
-    (set-redis-connection-single-owner! conn #f))
+    (set-redis-connect-owner! conn #f))
   (define pool
     (redis-connection-pool
      host port #f key=>conn idle-return-chan fresh-conn-sema
@@ -107,7 +102,7 @@
                    (map (lambda(thd.conn) (wrap-evt (thread-dead-evt (car thd.conn)) (lambda(_) thd.conn)))
                         (hash->list key=>conn)))
             (lambda(thd.conn)
-              (when (redis-connection-single-owner (cdr thd.conn))
+              (when (redis-connect-owner (cdr thd.conn))
                 (release-conn thd.conn (redis-connection-pool-dead? pool)))
               (loop)))
            (handle-evt
@@ -126,7 +121,6 @@
                 [thd.conn
                  (release-conn thd.conn (redis-connection-pool-dead? pool))
                  (loop)])))))))))
-  (current-redis-pool pool)
   pool)
 
 (define (kill-connection-pool pool)
@@ -141,24 +135,25 @@
                  (sync (redis-connection-pool-idle-conns pool)
                        (wrap-evt (redis-connection-pool-fresh-conn-sema pool)
                                  (lambda(_)
-                                   (real-connect (redis-connection-pool-host pool)
-                                                 (redis-connection-pool-port pool)
-                                                 pool)))))])
+                                   (connect (redis-connection-pool-host pool)
+                                            (redis-connection-pool-port pool))))))])
         (hash-set! (redis-connection-pool-key=>conn pool) (current-thread) conn)
-        (set-redis-connection-single-owner! conn (current-thread))
+        (set-redis-connect-owner! conn (current-thread))
         (thread-send (redis-connection-pool-manager-thread pool) 'new)
+  (printf "leased ~a\n" (eq-hash-code conn))
         conn)))
 
 (define (connection-pool-return pool conn)
-  (unless (eq? (current-thread) (redis-connection-single-owner conn))
+  (printf "returned ~a\n" (eq-hash-code conn))
+  (unless (eq? (current-thread) (redis-connect-owner conn))
     (redis-error "Attempted to disconnect leased connection when not owner."))
   ;; prevent double-return
-  (set-redis-connection-single-owner! conn #f)
+  (set-redis-connect-owner! conn #f)
   (thread-send (redis-connection-pool-manager-thread pool)
                (cons (current-thread) conn)))
 
 #;(define/contract (connect #:host [host "127.0.0.1"] #:port [port 6379])
-  (->* () (#:host string? #:port exact-nonnegative-integer?) redis-connection?)
+  (->* () (#:host string? #:port exact-nonnegative-integer?) redis-connect?)
   (let ([rconn (current-redis-connection)])
     (if (and (redis-connection-pool? rconn)
              (string=? (redis-connection-pool-host rconn) host)
@@ -166,20 +161,21 @@
         (connection-pool-lease rconn)
         (real-connect host port #f))))
 
-#;(define (real-connect host port pool)
+(define/contract (connect host port)
+  (-> string? exact-nonnegative-integer? redis-connect?)
   (let-values ([(in out) (tcp-connect host port)])
-    (redis-connection-single in out pool (current-thread))))
+    (redis-connect in out (current-thread))))
 
-#;(define/contract (disconnect [rconn (current-redis-connection)])
-  (->* () (redis-connection?) void?)
-  (match rconn
-    [#f (redis-error "Can't disconnect when not connected to server.")]
-    [(redis-connection-single _ _ (? redis-connection-pool? pool) _)
+(define/contract (disconnect conn)
+  (-> redis-connect? void?)
+  (match conn
+    #;[#f (redis-error "Can't disconnect when not connected to server.")]
+    #;[(redis-connection-single _ _ (? redis-connection-pool? pool) _)
      (disconnect pool)]
-    [(redis-connection-single in out _ _)
-     (send-cmd #:rconn rconn "QUIT")
+    [(redis-connect in out _)
+     (send-cmd #:rconn conn "QUIT")
      (close-input-port in) (close-output-port out)]
-    [(redis-connection-pool _ _ _ key=>conn _ _ _)
+    #;[(redis-connection-pool _ _ _ key=>conn _ _ _)
      (let ([maybe-connection (hash-ref key=>conn (current-thread) #f)])
        (when (and maybe-connection (eq? (current-thread) (redis-connection-single-owner maybe-connection)))
          (connection-pool-return rconn maybe-connection)))]))
@@ -193,21 +189,11 @@
        (lambda() (disconnect))))))
 
 ;; send cmd/recv reply --------------------------------------------------------
-(define CRLF #"\r\n")
 
-(define (send-cmd/no-reply #:rconn [conn (current-redis-connection)] cmd . args)
-  (define rconn (if (redis-connection-single? conn) conn (connect)))
-  (match-define (redis-connection-single in out _ owner) rconn)
-  (unless (eq? (current-thread) owner)
-    (redis-error 
-        "Attempted to use redis connection in thread other than owner."))
-  (write-bytes (mk-request cmd args) out)
-  (flush-output out))
-
-(define (send-cmd #:rconn [conn #f] 
-                  #:host [host "127.0.0.1"] 
-                  #:port [port 6379] 
-                  cmd . args)
+(define (send-cmd/no-reply #:rconn [conn #f]
+                           #:host [host LOCALHOST]
+                           #:port [port DEFAULT-REDIS-PORT] 
+                           cmd . args)
   (define rconn 
     (or conn 
         (connection-pool-lease
@@ -215,19 +201,32 @@
               (let ([new-pool (make-connection-pool #:host host #:port port)])
                 (current-redis-pool new-pool)
                 new-pool)))))
-  (match-define (redis-connection-single in out _ owner) rconn)
+  (match-define (redis-connect in out owner) rconn)
+  (printf "  conn: ~a\n" (eq-hash-code rconn))
+  (printf "  owner: ~a\n" (eq-hash-code owner))
+  (printf "  curr thread: ~a\n" (eq-hash-code (current-thread)))
   (unless (eq? (current-thread) owner)
     (redis-error 
-        "Attempted to use redis connection in thread other than owner."))
+      (format 
+       "Attempted to use redis connection in thread other than owner; cmd: ~a, args: ~a." cmd args)))
   (write-bytes (mk-request cmd args) out)
   (flush-output out)
+  rconn)
+
+(define (send-cmd #:rconn [conn #f] 
+                  #:host [host LOCALHOST]
+                  #:port [port DEFAULT-REDIS-PORT] 
+                  cmd . args)
+  (displayln cmd)
+  (define rconn 
+    (apply send-cmd/no-reply #:rconn conn #:host host #:port port cmd args))
   ;; must catch and re-throw here to display offending cmd and args
   (with-handlers ([exn:fail?
                    (lambda (x)
                      (redis-error (format "~a\nCMD: ~a\nARGS: ~a\n"
                                           (exn-message x) cmd args)))])
     (begin0 
-     (get-reply in) 
+     (get-reply (redis-connect-in rconn))
      (unless conn (connection-pool-return (current-redis-pool) rconn)))))
 
 (define (mk-request cmd args)
@@ -247,7 +246,8 @@
   (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF bs CRLF))
 
 ;; cmd and args are used for error reporting
-(define (get-reply in)
+(define (get-reply [in (redis-connect-in
+                         (connection-pool-lease (current-redis-pool)))])
   (define byte1 (read-char in))
   (define reply1 (read-line in 'return-linefeed))
   (match byte1
@@ -263,5 +263,6 @@
            (if (= numreplies -1) #\null
                (for/list ([n (in-range numreplies)]) (get-reply in))))]))
 
-(define (get-reply-evt [in (redis-connection-single-in (current-redis-connection))])
-  (wrap-evt in (lambda(_) (get-reply in))))
+(define (get-reply-evt [in (redis-connect-in 
+                             (connection-pool-lease (current-redis-pool)))])
+  (wrap-evt in get-reply))

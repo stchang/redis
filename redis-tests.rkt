@@ -37,7 +37,8 @@
   (define restore-cust (make-custodian))
   (define redis-conn-cust (make-custodian restore-cust))
   (define shutdown-rconn
-    (parameterize ([current-custodian redis-conn-cust]) (connect)))
+    (parameterize ([current-custodian redis-conn-cust]) 
+      (connection-pool-lease (make-connection-pool))))
   
   (define rdb-dir
     (bytes->string/utf-8 (second (send-cmd 'config 'get 'dir))))
@@ -84,7 +85,9 @@
   ;; do tests  
   (newline)
   (printf "Running tests ..........\n")
-         
+
+  ;; BEGIN TESTS --------------------------------------------------------------
+  
 ;; disconnected exn
 (check-true (SET "x" 100)) ;; should auto-connect
 (check-redis-exn (disconnect))
@@ -250,17 +253,18 @@
   (check-false (BRPOPLPUSH "lst-non-exist" "lst" 1))
 
   (define achan (make-async-channel))
-  ;; #f = make new single connection, instead of using pool
-  (parameterize ([current-redis-connection #f]) 
-    (thread (lambda () (async-channel-put achan (BRPOP "lst" 0)))))
+  ;; new thread will automatically get new connection
+;;  ;; #f = make new single connection, instead of using pool
+;  (parameterize ([current-redis-connection #f]) 
+    (thread (lambda () (async-channel-put achan (BRPOP "lst" 0))))
   (check-equal? (RPUSH "lst" "aaa") 1)
   (check-equal? (async-channel-get achan) (list #"lst" #"aaa"))
-  (parameterize ([current-redis-connection #f])
-    (thread (lambda () (async-channel-put achan (BLPOP "lst" 0)))))
+;  (parameterize ([current-redis-connection #f])
+    (thread (lambda () (async-channel-put achan (BLPOP "lst" 0))))
   (check-equal? (RPUSH "lst" "bbb") 1)
   (check-equal? (async-channel-get achan) (list #"lst" #"bbb"))
-  (parameterize ([current-redis-connection #f])
-    (thread (lambda () (async-channel-put achan (BRPOPLPUSH "lst" "lst2" 0)))))
+;  (parameterize ([current-redis-connection #f])
+    (thread (lambda () (async-channel-put achan (BRPOPLPUSH "lst" "lst2" 0))))
   (check-equal? (RPUSH "lst" "ccc") 1)
   (check-equal? (async-channel-get achan) #"ccc")
   )
@@ -417,8 +421,8 @@
 ;; pub/sub
 (test
   ;; sub/unsub
- (parameterize ([current-redis-connection #f]) ; drop the pool
-   (parameterize ([current-redis-connection (connect)]) ; single
+; (parameterize ([current-redis-connection #f]) ; drop the pool
+;   (parameterize ([current-redis-connection (connect)]) ; single
      (check-void? (SUBSCRIBE 'foo 'bar))
      (check-equal? (get-reply) (list #"subscribe" #"foo" 1))
      (check-equal? (get-reply) (list #"subscribe" #"bar" 2))
@@ -426,17 +430,17 @@
      (check-equal? (get-reply) (list #"psubscribe" #"news.*" 3))
      (define achan (make-async-channel))
      (thread (lambda () (async-channel-put achan (get-reply))))
-     (parameterize ([current-redis-connection (connect)])
-       (PUBLISH 'foo "Hello")) ; publish with new connection
+;     (parameterize ([current-redis-connection (connect)])
+     (thread (lambda () (PUBLISH 'foo "Hello"))) ; publish with new connection
      (check-equal? (async-channel-get achan) (list #"message" #"foo" #"Hello"))
-     (parameterize ([current-redis-connection (connect)])
-       (PUBLISH 'foo "Kello")) ; publish with new connection
+;     (parameterize ([current-redis-connection (connect)])
+     (thread (lambda () (PUBLISH 'foo "Kello"))) ; publish with new connection
      (check-equal? (sync (get-reply-evt)) (list #"message" #"foo" #"Kello"))
      ;; test for the bug fixed by m4burns, where a SUBSCRIBE
      ;; followed by a get-reply can accidentally read a message from another
      ;; subscribe instead of the SUBSCRIBE cmd reply msg
-     (parameterize ([current-redis-connection (connect)])
-       (PUBLISH 'foo "Jello")) ; publish with new connection
+;     (parameterize ([current-redis-connection (connect)])
+     (thread (lambda () (PUBLISH 'foo "Jello"))) ; publish with new connection
      (check-void? (SUBSCRIBE 'goo))
      (check-equal? (get-reply) (list #"message" #"foo" #"Jello"))
      (check-equal? (get-reply) (list #"subscribe" #"goo" 4))
@@ -449,14 +453,14 @@
      ;; psub/punsub
      ;; (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 1))
      (thread (lambda () (async-channel-put achan (get-reply))))
-     (parameterize ([current-redis-connection (connect)])
-       (PUBLISH 'news.art "Pello"))
+;     (parameterize ([current-redis-connection (connect)])
+     (thread (lambda () (PUBLISH 'news.art "Pello")))
      (check-equal? (async-channel-get achan)
                    (list #"pmessage" #"news.*" #"news.art" #"Pello"))
      (check-void? (PUNSUBSCRIBE "news.*"))
      (check-equal? (get-reply) (list #"punsubscribe" #"news.*" 0))
      ;; PUBSUB cmd only available in redis version >= 2.8
-  )))
+  )
 
 ; random key
 (test
