@@ -15,7 +15,7 @@
 (define-syntax (defcmd stx)
   (syntax-parse stx
     [(_ CMD (~or (~optional (~seq #:return fn) #:defaults ([fn #'(lambda (x) x)]))
-                 (~optional (~seq #:no-reply nr) #:defaults ([nr #'#f]))) ...)
+                 (~optional (~seq #:no-reply nr) #:defaults ([nr #f]))) ...)
     #:with a-send-cmd (if (attribute nr) #'send-cmd/no-reply #'send-cmd)
      ;; #:with res #`(apply #,(if (attribute nr)
      ;;                           #'(if nr send-cmd/no-reply send-cmd)
@@ -25,8 +25,8 @@
     #'(define (CMD #:rconn [conn #f] 
                    #:host [host LOCALHOST]
                    #:port [port DEFAULT-REDIS-PORT] . args)
-        (fn (apply a-send-cmd 
-                   #:rconn conn #:host host #:port port 'CMD args)))]))
+        (fn 
+         (apply a-send-cmd #:rconn conn #:host host #:port port 'CMD args)))]))
 ;;         #,(if (attribute fn) #'(fn res) #'res))]))
 (define-syntax-rule (defcmds c ...) (begin (defcmd c) ...))
 (define-syntax-rule (defcmd/nr c) (defcmd c #:no-reply #t))
@@ -81,7 +81,7 @@
      #:with conn (datum->syntax #'CMDfn 'conn)
      #:with host (datum->syntax #'CMDfn 'host)
      #:with port (datum->syntax #'CMDfn 'port)
-     #'(apply CMDfn #:rconn conn #:host host #:port port arg ...)]))
+     #'(CMDfn #:rconn conn #:host host #:port port arg ...)]))
 ;; macro to apply GET cmd, without having to type all the args
 (define-syntax (apply-GET stx)
   (syntax-parse stx
@@ -180,7 +180,8 @@
   (define (OP #:rconn [conn #f]
               #:host [host LOCALHOST]
               #:port [port DEFAULT-REDIS-PORT] dest . keys)
-    (apply send-cmd #:rconn conn #:host host #:port port 'OP dest keys)))
+    (apply send-cmd #:rconn conn #:host host #:port port 
+           "BITOP" 'OP dest keys)))
   ;; (define (OP #:rconn [rconn (current-redis-connection)] dest . keys)
   ;;   (apply send-cmd #:rconn rconn "BITOP" 'OP dest keys)))
 (define-syntax-rule (defcmds/bitop op ...) (begin (defcmd/bitop op) ...))

@@ -19,3 +19,5 @@
   (check-equal? (list->set e) (set x ...)))
 
 (define-syntax-rule (check-void? e) (check-equal? e (void)))
+(define-syntax-rule (check-redis-connection? e) 
+  (check-true (redis-connect? e)))
