@@ -1,6 +1,6 @@
 #lang racket
 (require "redis.rkt" "bytes-utils.rkt" "constants.rkt")
-(require (for-syntax syntax/parse syntax/parse/experimental/template))
+(require (for-syntax syntax/parse))
 (require data/heap)
 
 ; functions for specific redis commands
@@ -10,24 +10,19 @@
 ;; TODO
 ;; [o] 2013-09-25: SUBSCRIBE cmd should return (async?) channel?
 ;; [o] 2013-09-23: define macro that defines defcmd and defcmds at same time
-;; [o] 2013-09-23: define macro that defines all GET/SET variants
+;; [x] 2013-09-23: define macro that defines all GET/SET variants
+;;                 DONE: 2014-07-18
 
 (define-syntax (defcmd stx)
   (syntax-parse stx
     [(_ CMD (~or (~optional (~seq #:return fn) #:defaults ([fn #'(lambda (x) x)]))
                  (~optional (~seq #:no-reply nr) #:defaults ([nr #f]))) ...)
     #:with a-send-cmd (if (attribute nr) #'send-cmd/no-reply #'send-cmd)
-     ;; #:with res #`(apply #,(if (attribute nr)
-     ;;                           #'(if nr send-cmd/no-reply send-cmd)
-     ;;                           #'send-cmd)
-     ;;                     #:rconn conn #:host host #:port port 'CMD args)
-;;    (template
     #'(define (CMD #:rconn [conn #f] 
                    #:host [host LOCALHOST]
                    #:port [port DEFAULT-REDIS-PORT] . args)
         (fn 
          (apply a-send-cmd #:rconn conn #:host host #:port port 'CMD args)))]))
-;;         #,(if (attribute fn) #'(fn res) #'res))]))
 (define-syntax-rule (defcmds c ...) (begin (defcmd c) ...))
 (define-syntax-rule (defcmd/nr c) (defcmd c #:no-reply #t))
 (define-syntax-rule (defcmds/nr c ...) (begin (defcmd/nr c) ...))
@@ -35,7 +30,7 @@
   (defcmd c #:return (lambda (reply) (and (not (eq? #\null reply)) reply))))
 (define-syntax-rule (defcmds/chknil c ...) (begin (defcmd/chknil c) ...))
 (define-syntax-rule (defcmd/ok c)
-  (defcmd c #:return (lambda (reply) (or (string=? "OK" reply) (string=? "QUEUED" reply)))))
+  (defcmd c #:return (lambda (re) (or (string=? "OK" re) (string=? "QUEUED" re)))))
 (define-syntax-rule (defcmds/ok c ...) (begin (defcmd/ok c) ...))
 (define-syntax-rule (defcmd/01 c)
   (defcmd c #:return (lambda(reply) (not (and (number? reply) (zero? reply))))))
@@ -95,66 +90,43 @@
      #:with key (datum->syntax #'SETfn 'key)
      #:with val (datum->syntax #'SETfn 'val)
      #'(apply-CMD SETfn key val arg ...)]))
+
 ;; converts bytestring from GET according to conv function
-;; (define (GET/as #:rconn [rconn (current-redis-connection)] key
-;;                 #:conv [conv identity])
 (define-GET (GET/as #:conv [conv identity])
-;  (define reply (GET #:rconn conn #:host host #:port port key))
   (define reply (apply-GET GET))
   (and reply (conv reply)))
 ;; returns value of key as string (errors if not valid string)
-;(define (GET/str #:rconn [rconn (current-redis-connection)] key)
 (define-GET (GET/str) (apply-GET GET/as #:conv bytes->string/utf-8))
-;  (GET/as #:rconn rconn key #:conv bytes->string/utf-8))
 (define-GET (GET/num) (apply-GET GET/as #:conv bytes->number))
-;; (define (GET/num #:rconn [rconn (current-redis-connection)] key)
-;;   (GET/as #:rconn rconn key #:conv bytes->number))
-;; (define (GETRANGE/str #:rconn [rconn (current-redis-connection)] key start end)
-;;   (define reply (GETRANGE #:rconn rconn key start end))
 (define-GET (GETRANGE/str start end)
   (define reply (apply-GET GETRANGE start end))
   (and reply (bytes->string/utf-8 reply)))
-;(define (SET/list #:rconn [rconn (current-redis-connection)] key lst)
 (define-SET (SET/list)
   (apply-CMD DEL key)
   (for/last ([x val]) (apply-CMD RPUSH key x)))
-;; (define (POP/list #:rconn [rconn (current-redis-connection)] key 
-;;                   #:map-fn [f identity])
 (define-GET (POP/list #:map-fn [f identity])
   (let loop ([x (apply-GET LPOP)])
     (if x (cons (f x) (loop (apply-GET LPOP))) null)))
 (define-GET (GET/list #:map-fn [f identity])
-;; (define (GET/list #:rconn [rconn (current-redis-connection)] key 
-;;                   #:map-fn [f identity])
   (let loop ([n (sub1 (apply-GET LLEN))] [lst null])
     (if (< n 0) lst
         (let ([x (apply-GET LINDEX n)])
           (if x (loop (sub1 n) (cons (f x) lst)) (loop (sub1 n) lst))))))
-;; (define (GET/set #:rconn [rconn (current-redis-connection)] key 
-;;                   #:map-fn [f identity])
 (define-GET (GET/set #:map-fn [f identity])
   (list->set (map f (apply-GET SMEMBERS))))
-;(define (SET/set #:rconn [rconn (current-redis-connection)] k xs)
 (define-SET (SET/set)
   (DEL #:rconn conn key)
   (for ([x (in-set val)]) (apply-CMD SADD key x)))
-;; (define (GET/hash #:rconn [rconn (current-redis-connection)] key
 (define-GET (GET/hash #:map-key [fkey identity] #:map-val [fval identity])
   (let loop ([lst (apply-GET HGETALL)] [h (hash)])
     (if (null? lst) h 
         (loop (cddr lst) (hash-set h (fkey (car lst)) (fval (cadr lst)))))))
-;; (define (SET/hash #:rconn [conn (current-redis-connection)] key h)
-;;   (define rconn (or conn (connect)))
-;;   (parameterize ([current-redis-connection rconn])
 (define-SET (SET/hash)
   (do-MULTI
     (DEL key)
     (for ([(k v) (in-hash val)]) (apply-CMD HSET key k v))))
-;  (unless conn (disconnect rconn)))
-;(define (SET/heap #:rconn [rconn (current-redis-connection)] key h)
 (define-SET (SET/heap)
   (for ([(k v) (in-hash val)]) (apply-CMD ZADD key v k)))
-;; (define (GET/heap #:rconn [rconn (current-redis-connection)] key
 (define-GET (GET/heap #:map-fn [f identity] #:map-score [fsco identity])
   (define hp (make-heap (λ (x y) (<= (car x) (car y)))))
   (let loop ([lst (apply-GET ZRANGE 0 -1 'WITHSCORES)])
@@ -163,8 +135,6 @@
       (loop (cddr lst))))
   hp)
     
-  
-
 
 ;; DUMP and RESTORE
 (defcmd/chknil DUMP)
@@ -182,8 +152,6 @@
               #:port [port DEFAULT-REDIS-PORT] dest . keys)
     (apply send-cmd #:rconn conn #:host host #:port port 
            "BITOP" 'OP dest keys)))
-  ;; (define (OP #:rconn [rconn (current-redis-connection)] dest . keys)
-  ;;   (apply send-cmd #:rconn rconn "BITOP" 'OP dest keys)))
 (define-syntax-rule (defcmds/bitop op ...) (begin (defcmd/bitop op) ...))
 
 (defcmds/bitop AND OR XOR NOT)
@@ -199,7 +167,6 @@
 (defcmd/ok HMSET)
 (defcmds/01 HSET HEXISTS HSETNX)
 (defcmds/chknil HGET)
-;(define (HGET/str #:rconn [rconn (current-redis-connection)] key field)
 (define-GET (HGET/str field)
   (define reply (apply-GET HGET field))
   (and reply (bytes->string/utf-8 reply)))
