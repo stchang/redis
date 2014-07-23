@@ -18,7 +18,7 @@
 (provide connect disconnect (struct-out redis-connection)
          send-cmd send-cmd/no-reply current-redis-pool
          get-reply get-reply/port get-reply-evt get-reply-evt/port
-         make-connection-pool kill-connection-pool
+         make-connection-pool kill-connection-pool redis-connection-pool?
          connection-pool-lease connection-pool-return 
          pubsub-connection? lease-pubsub-conn return-pubsub-conn make-subscribe-chan)
 
@@ -48,6 +48,7 @@
 
 (define current-redis-pool (make-parameter #f))
 
+;; verifies that the owner of a connection is valid
 (define-syntax-rule (check-owner-ok connection operation-str)
   (let ([curr-owner (redis-connection-owner connection)])
     (unless (or (not curr-owner) ; owner = #f means the pool has it, so it's ok
@@ -87,14 +88,10 @@
                         #:port [port DEFAULT-REDIS-PORT]
                         #:max-connections [max-conn 100]
                         #:max-idle [max-idle 10])
-  (->* () (#:host
-           string?
-           #:port
-           exact-nonnegative-integer?
-           #:max-connections
-           exact-nonnegative-integer?
-           #:max-idle
-           exact-nonnegative-integer?)
+  (->* () (#:host string?
+           #:port (integer-in 1 65535)
+           #:max-connections exact-nonnegative-integer?
+           #:max-idle exact-nonnegative-integer?)
        redis-connection-pool?)
   ;; using async-channel here as a concurrent queue
   (define idle-return-chan (make-async-channel max-idle))
@@ -117,6 +114,7 @@
       ;; Reset state of returned connection.
       (send-cmd/no-reply #:rconn conn "UNWATCH")
       (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
+      (send-cmd/no-reply #:rconn conn "PUNSUBSCRIBE")
       (send-cmd/no-reply #:rconn conn "ECHO" RESET-MSG)
       (let loop () (unless (equal? (get-reply conn) RESET-MSG) (loop)))
       (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
@@ -388,6 +386,22 @@
                                           (exn-message x) cmd args)))])
     (get-reply rconn)))
 
+(define (mk-request cmd args)
+  (bytes-append
+   (string->bytes/utf-8
+    (string-append "*" (number->string (add1 (length args))) "\r\n"))
+   (arg->bytes cmd)
+   (apply bytes-append (map arg->bytes args))))
+
+(define (arg->bytes val)
+  (define bs
+    (cond [(bytes? val) val]
+          [(string? val) (string->bytes/utf-8 val)]
+          [(number? val) (number->bytes val)]
+          [(symbol? val) (symbol->bytes val)]
+          [else (error 'send "invalid argument: ~v\n" val)]))
+  (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF bs CRLF))
+
 ;; get-reply : reads the reply from a redis-connection
 ;; cmd and args are used for error reporting
 ;; default in port is the connection for the current thread
@@ -417,20 +431,4 @@
             [in (redis-connection-in 
                   (connection-pool-lease (current-redis-pool)))])
   (wrap-evt in get-reply/port))
-
-(define (arg->bytes val)
-  (define bs
-    (cond [(bytes? val) val]
-          [(string? val) (string->bytes/utf-8 val)]
-          [(number? val) (number->bytes val)]
-          [(symbol? val) (symbol->bytes val)]
-          [else (error 'send "invalid argument: ~v\n" val)]))
-  (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF bs CRLF))
-
-(define (mk-request cmd args)
-  (bytes-append
-   (string->bytes/utf-8
-    (string-append "*" (number->string (add1 (length args))) "\r\n"))
-   (arg->bytes cmd)
-   (apply bytes-append (map arg->bytes args))))
 
