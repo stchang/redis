@@ -12,7 +12,7 @@
 A @hyperlink["http://redis.io/"]{Redis} client for Racket.
 
 @(define the-eval (make-base-eval))
-@(the-eval '(require redis))
+@(the-eval '(require redis racket/async-channel))
 
 @author[@author+email["Stephen Chang" "stchang@racket-lang.org"]]
 @author[@author+email["Marc Burns" "m4burns@csclub.uwaterloo.ca"]]
@@ -56,7 +56,15 @@ used if no pool is given.
   The pool maintains one connection per thread. Therefore, if no connection
 exists for the current thread, then a new connection is created. If a
 connection already exists for the current thread, then that connection is
-returned.}
+returned.
+@examples[#:eval the-eval
+(define pool (make-connection-pool))
+(eq? (connection-pool-lease pool) (connection-pool-lease pool))
+(eq-hash-code (connection-pool-lease pool))
+(define ch (make-async-channel))
+(thread (lambda () (async-channel-put ch (eq-hash-code (connection-pool-lease pool)))))
+(async-channel-get ch)]
+}
 
 @defproc[(connection-pool-return 
           [conn redis-connection?]
@@ -98,7 +106,13 @@ parameters. Waits for a reply from Redis and returns it.
        @racket[current-redis-pool].}]
 
 A command can either be a string, a byte string, or a symbol. An arguments can
-take the form of a string, byte string, symbol, or number.}
+take the form of a string, byte string, symbol, or number.
+
+@examples[#:eval the-eval
+(define pool (make-connection-pool))
+(define conn (connection-pool-lease pool))
+(send-cmd #:rconn conn 'dbsize)]
+}
 
 @defproc[(send-cmd/no-reply [#:rconn conn bool/c #f]
                        	    [#:host host string? "127.0.0.1"]
@@ -111,7 +125,13 @@ used to send the command is returned.}
 
 @defproc[(get-reply [conn (connection-pool-lease (current-redis-pool))]) 
          any/c]{
-  Gets a reply from Redis using the given connection.}
+  Gets a reply from Redis using the given connection.
+@examples[#:eval the-eval
+(define pool (make-connection-pool))
+(define conn (connection-pool-lease pool))
+(send-cmd #:rconn conn 'set 'testing 101)
+(get-reply (send-cmd/no-reply #:rconn conn 'get 'testing))]
+}
 
 @defproc[(get-reply-evt [conn (connection-pool-lease (current-redis-pool))]) 
          evt?]{
@@ -131,7 +151,13 @@ Check the Redis documentation for what return values to expect.
 APPEND DEL GETSET MGET SETRANGE STRLEN EXISTS MSETNX RENAMENX GET GETRANGE RANDOMKEY SET MSET RENAME DUMP RESTORE SETBIT GETBIT BITCOUNT BITOP LPUSH LPUSHX LRANGE LLEN LREM RPUSH RPUSHX LINDEX LPOP RPOP RPOPLPUSH BLPOP BRPOP BRPOPL PUSH LINSERT LSET LTRIM HDEL HGETALL HINCRBY HINCRBYFLOAT HMGET HVALS HMSET HSET HEXISTS HSETNX HGET SADD SCARD SDIFF SDIFFSTORE SINTER SINTERSTORE SMEMBERS SREM SUNION SUNIONSTORE SISMEMBER SMOVE SPOP SRANDMEMBER ZADD ZCARD ZCOUNT ZINCRBY ZINTERSTORE ZRANGE ZRANGEBYSCORE ZREM ZREMRANGEBYRANK ZREMRANGEBYSCORE ZREVRANGE ZREVRANGEBYSCORE ZUNIONSTORE ZRANK ZREVRANK ZSCORE DECR DECRBY INCR INCRBY INCRBYFLOAT HKEYS HLEN EXPIRE EXPIREAT PERSIST PEXPIRE PEXPIREAT TTL PTTL MULTI DISCARD WATCH UNWATCH EXEC SUBSCRIBE UNSUBSCRIBE PSUBSCRIBE PUNSUBSCRIBE PUBLISH DBSIZE ECHO FLUSHALL FLUSHDB KEYS PING TIME TYPE AUTH QUIT SELECT}
 
  @item{The following GET variations, which return different types of results, are defined:
-GET/str GET/num GETRANGE/str GET/list GET/set GET/hash GET/heap}
+GET/str GET/num GETRANGE/str GET/list GET/set GET/hash GET/heap
+@examples[#:eval the-eval
+(SET 'testing2 101)
+(GET 'testing2)
+(GET/str 'testing2)
+(GET/num 'testing2)]
+}
 
  @item{The following SET variations, which allow different types of input, are defined: SET/list SET/set SET/hash SET/heap}
 
@@ -178,7 +204,22 @@ subscription messages are sent.
 Creates a thread that monitors the connection for subscription messages.
 
 To (p)unsubscribe from a subscription, use @racket[send-cmd] or @racket[UNSUBSCRIBE], or @racket[PUNSUBSCRIBE] with the appropriate 
-@tech{pubsub-specific connection}.}
+@tech{pubsub-specific connection}.
+
+@examples[#:eval the-eval
+(define pool (make-connection-pool))
+(define pubsubconn (lease-pubsub-conn pool))
+(redis-connection? pubsubconn)
+(pubsub-connection? pubsubconn)
+(define foo-chan (make-subscribe-chan pubsubconn 'foo pool))
+(define bar-chan (make-subscribe-chan pubsubconn 'bar pool))
+(sleep .1)
+(thread (λ () (PUBLISH 'foo "Hello")))
+(thread (λ () (PUBLISH 'bar "World!")))
+(async-channel-get foo-chan)
+(async-channel-get bar-chan)
+]
+}
 
 @defproc[(return-pubsub-conn
           [conn pubsub-connection?]
