@@ -9,13 +9,13 @@
   
   (printf
     (~a "\n"
-      "*WARNING*: Interrupting these tests will result in data loss.\n"
-      "  Running these tests (temporarily) deletes keys from the db. The keys "
+      "*WARNING*: Interrupting these tests will result in data loss.\n\n"
+      "* Running these tests (temporarily) deletes keys from the db. The keys "
       "are restored when the tests conclude but if the tests are interrupted, "
       "the keys won't get restored, meaning you'll lose data. The current "
       "keys are saved to disk before testing begins so if the tests get "
-      "interrupted, you should manually restore the keys from disk.\n"
-      "  The tests also change the redis parameters \"dir\" and "
+      "interrupted, you should manually restore the keys from disk.\n\n"
+      "* The tests also change the redis parameters \"dir\" and "
       "\"dbfilename\". The current parameters are similarly saved before the "
       "tests begin and restored at the end of the tests. The tests try to "
       "restore these parameters if the tests are interrupted, but I don't "
@@ -25,7 +25,10 @@
   
   (define y (read))
 
-  (when (eq? 'y y)
+  ;; abort
+  (unless (eq? 'y y) (error "exiting"))
+  
+  ;; continue
   
   ;; save keys to disk
   (newline)
@@ -37,8 +40,7 @@
   (define restore-cust (make-custodian))
   (define redis-conn-cust (make-custodian restore-cust))
   (define shutdown-rconn
-    (parameterize ([current-custodian redis-conn-cust]) 
-      (connection-pool-lease (make-connection-pool))))
+    (parameterize ([current-custodian redis-conn-cust]) (connect)))
   
   (define rdb-dir
     (bytes->string/utf-8 (second (send-cmd 'config 'get 'dir))))
@@ -88,9 +90,11 @@
 
   ;; BEGIN TESTS --------------------------------------------------------------
   
-;; disconnected exn
-(check-true (SET "x" 100)) ;; should auto-connect
-;;(check-redis-exn (disconnect))
+;; basic connection
+(define conn1 (connect))
+(check-true (SET #:rconn conn1 "x" 100)) 
+(check-equal? (GET/str #:rconn conn1 "x") "100")
+(check-not-exn (lambda () (disconnect conn1)))
 
 ; test GET, SET, EXISTS, DEL, APPEND, etc
 (test
@@ -254,17 +258,13 @@
 
   (define achan (make-async-channel))
   ;; new thread will automatically get new connection
-;;  ;; #f = make new single connection, instead of using pool
-;  (parameterize ([current-redis-connection #f]) 
-    (thread (lambda () (async-channel-put achan (BRPOP "lst" 0))))
+  (thread (lambda () (async-channel-put achan (BRPOP "lst" 0))))
   (check-equal? (RPUSH "lst" "aaa") 1)
   (check-equal? (async-channel-get achan) (list #"lst" #"aaa"))
-;  (parameterize ([current-redis-connection #f])
-    (thread (lambda () (async-channel-put achan (BLPOP "lst" 0))))
+  (thread (lambda () (async-channel-put achan (BLPOP "lst" 0))))
   (check-equal? (RPUSH "lst" "bbb") 1)
   (check-equal? (async-channel-get achan) (list #"lst" #"bbb"))
-;  (parameterize ([current-redis-connection #f])
-    (thread (lambda () (async-channel-put achan (BRPOPLPUSH "lst" "lst2" 0))))
+  (thread (lambda () (async-channel-put achan (BRPOPLPUSH "lst" "lst2" 0))))
   (check-equal? (RPUSH "lst" "ccc") 1)
   (check-equal? (async-channel-get achan) #"ccc")
   )
@@ -421,44 +421,75 @@
 ;; pub/sub
 (test
   ;; sub/unsub
-; (parameterize ([current-redis-connection #f]) ; drop the pool
-;   (parameterize ([current-redis-connection (connect)]) ; single
-     (SUBSCRIBE 'foo 'bar)
-     (check-equal? (get-reply) (list #"subscribe" #"foo" 1))
-     (check-equal? (get-reply) (list #"subscribe" #"bar" 2))
-     (PSUBSCRIBE "news.*")
-     (check-equal? (get-reply) (list #"psubscribe" #"news.*" 3))
-;     (parameterize ([current-redis-connection (connect)])
-     (thread (lambda () (PUBLISH 'foo "Hello"))) ; publish with new connection
-     (check-equal? (get-reply) (list #"message" #"foo" #"Hello"))
-;     (parameterize ([current-redis-connection (connect)])
-     (thread (lambda () (PUBLISH 'foo "Kello"))) ; publish with new connection
-     (check-equal? (sync (get-reply-evt)) (list #"message" #"foo" #"Kello"))
-     ;; test for the bug fixed by m4burns, where a SUBSCRIBE
-     ;; followed by a get-reply can accidentally read a message from another
-     ;; subscribe instead of the SUBSCRIBE cmd reply msg
-;     (parameterize ([current-redis-connection (connect)])
-     (thread (lambda () (PUBLISH 'foo "Jello"))) ; publish with new connection
-     (sleep 0.01)
-     (SUBSCRIBE 'goo)
-     (check-equal? (get-reply) (list #"message" #"foo" #"Jello"))
-     (check-equal? (get-reply) (list #"subscribe" #"goo" 4))
-     ;; test unsubscribe
-     (UNSUBSCRIBE 'foo)
-     (check-equal? (get-reply) (list #"unsubscribe" #"foo" 3))
-     (UNSUBSCRIBE)
-     (check-equal? (get-reply) (list #"unsubscribe" #"goo" 2))
-     (check-equal? (get-reply) (list #"unsubscribe" #"bar" 1))
-     ;; psub/punsub
-     ;; (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 1))
-;     (parameterize ([current-redis-connection (connect)])
-     (thread (lambda () (PUBLISH 'news.art "Pello")))
-     (check-equal? (get-reply)
-                   (list #"pmessage" #"news.*" #"news.art" #"Pello"))
-     (PUNSUBSCRIBE "news.*")
-     (check-equal? (get-reply) (list #"punsubscribe" #"news.*" 0))
-     ;; PUBSUB cmd only available in redis version >= 2.8
-  )
+ (SUBSCRIBE 'foo 'bar)
+ (check-equal? (get-reply) (list #"subscribe" #"foo" 1))
+ (check-equal? (get-reply) (list #"subscribe" #"bar" 2))
+ (PSUBSCRIBE "news.*")
+ (check-equal? (get-reply) (list #"psubscribe" #"news.*" 3))
+ (thread (lambda () (PUBLISH 'foo "Hello"))) ; publish with new connection
+ (check-equal? (get-reply) (list #"message" #"foo" #"Hello"))
+ (thread (lambda () (PUBLISH 'foo "Kello"))) ; publish with new connection
+ (check-equal? (sync (get-reply-evt)) (list #"message" #"foo" #"Kello"))
+ ;; test for the bug fixed by m4burns, where a SUBSCRIBE
+ ;; followed by a get-reply can accidentally read a message from another
+ ;; subscribe instead of the SUBSCRIBE cmd reply msg
+ (thread (lambda () (PUBLISH 'foo "Jello"))) ; publish with new connection
+ (sleep 0.01)
+ (SUBSCRIBE 'goo)
+ (check-equal? (get-reply) (list #"message" #"foo" #"Jello"))
+ (check-equal? (get-reply) (list #"subscribe" #"goo" 4))
+ ;; test unsubscribe
+ (UNSUBSCRIBE 'foo)
+ (check-equal? (get-reply) (list #"unsubscribe" #"foo" 3))
+ (UNSUBSCRIBE)
+ (check-equal? (get-reply) (list #"unsubscribe" #"goo" 2))
+ (check-equal? (get-reply) (list #"unsubscribe" #"bar" 1))
+ ;; psub/punsub
+ ;; (check-equal? (PSUBSCRIBE "news.*") (list #"psubscribe" #"news.*" 1))
+ (thread (lambda () (PUBLISH 'news.art "Pello")))
+ (check-equal? (get-reply)
+   (list #"pmessage" #"news.*" #"news.art" #"Pello"))
+ (PUNSUBSCRIBE "news.*")
+ (check-equal? (get-reply) (list #"punsubscribe" #"news.*" 0))
+ ;; PUBSUB cmd only available in redis version >= 2.8
+ )
+
+;; pubsub2: using pubsub-specific connections
+(test
+ (define conn1 (lease-pubsub-conn))
+ (check-true (pubsub-connection? conn1))
+ (define foo-ch (make-subscribe-chan conn1 'foo))
+ (define bar-ch (make-subscribe-chan conn1 'bar))
+ (define news*-ch (make-subscribe-chan conn1 "news.*" #:psubscribe #t))
+ (thread (lambda () (PUBLISH 'foo "Hello"))) ; publish with new connection
+ (check-equal? (sync/timeout .1 foo-ch) #"Hello")
+ (thread (lambda () (PUBLISH 'foo "Kello"))) ; publish with new connection
+ (check-equal? (sync/timeout .1 foo-ch) #"Kello")
+ ;; test for the bug fixed by m4burns, where a SUBSCRIBE
+ ;; followed by a get-reply can accidentally read a message from another
+ ;; subscribe instead of the SUBSCRIBE cmd reply msg
+ (thread (lambda () (PUBLISH 'foo "Jello"))) ; publish with new connection
+ (sleep 0.01)
+ (define goo-ch (make-subscribe-chan conn1 'goo))
+ (check-equal? (sync/timeout .1 foo-ch) #"Jello")
+ ;; test unsubscribe
+ (UNSUBSCRIBE #:rconn conn1 'foo)
+ (thread (lambda () (PUBLISH 'foo "Mello"))) ; publish with new connection
+ (check-false (async-channel-try-get foo-ch)) ; test connection closed
+ 
+ (UNSUBSCRIBE #:rconn conn1)
+ (thread (lambda () (PUBLISH 'bar "Mello"))) ; publish with new connection
+ (thread (lambda () (PUBLISH 'goo "Mello"))) ; publish with new connection
+ (check-false (async-channel-try-get bar-ch))
+ (check-false (async-channel-try-get goo-ch))
+
+ ;; news.* still psubscribed to conn1
+ (thread (lambda () (PUBLISH 'news.art "Pello")))
+ (check-equal? (sync/timeout .1 news*-ch) (list #"news.art" #"Pello"))
+ (PUNSUBSCRIBE #:rconn conn1 "news.*")
+ (thread (lambda () (PUBLISH 'news.art "Qello")))
+ (check-false (async-channel-try-get news*-ch))
+)
 
 ; random key
 (test
@@ -672,4 +703,4 @@
   (printf "- restoring \"dbfilename\" to: ~a\n" rdb-file)
   (send-cmd 'config 'set 'dbfilename rdb-file)
   (unregister-custodian-shutdown dir+file cust-reg)
-))
+)

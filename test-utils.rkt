@@ -1,5 +1,5 @@
 #lang racket
-(require "redis.rkt" "redis-cmds.rkt")
+(require "redis.rkt" "redis-cmds.rkt" "redis-error.rkt")
 (require rackunit)
 (provide (all-defined-out))
 

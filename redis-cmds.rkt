@@ -1,14 +1,15 @@
-#lang racket
+#lang racket/base
 (require "redis.rkt" "bytes-utils.rkt" "constants.rkt")
-(require (for-syntax syntax/parse))
-(require data/heap)
+(require (for-syntax syntax/parse racket/base))
+(require data/heap racket/async-channel racket/port racket/set racket/match)
 
 ; functions for specific redis commands
 
 (provide (all-defined-out))
 
 ;; TODO
-;; [o] 2013-09-25: SUBSCRIBE cmd should return (async?) channel?
+;; [x] 2013-09-25: SUBSCRIBE cmd should return (async?) channel?
+;;                 DONE: 2014-07-23
 ;; [o] 2013-09-23: define macro that defines defcmd and defcmds at same time
 ;; [x] 2013-09-23: define macro that defines all GET/SET variants
 ;;                 DONE: 2014-07-18
@@ -46,6 +47,8 @@
 
 ;; macro to define extension/variation functions of a CMD
 ;; so you dont have to repeatedly type in all the conn/host/port args
+;; WARNING: the following forms capture these variable names:
+;; - conn, host port, key, val
 (define-syntax (define-CMD-fn stx)
   (syntax-parse stx
     [(_ (CMDfn arg ...) body ...)
@@ -92,7 +95,7 @@
      #'(apply-CMD SETfn key val arg ...)]))
 
 ;; converts bytestring from GET according to conv function
-(define-GET (GET/as #:conv [conv identity])
+(define-GET (GET/as #:conv [conv (lambda (x) x)])
   (define reply (apply-GET GET))
   (and reply (conv reply)))
 ;; returns value of key as string (errors if not valid string)
@@ -104,20 +107,20 @@
 (define-SET (SET/list)
   (apply-CMD DEL key)
   (for/last ([x val]) (apply-CMD RPUSH key x)))
-(define-GET (POP/list #:map-fn [f identity])
+(define-GET (POP/list #:map-fn [f (lambda (x) x)])
   (let loop ([x (apply-GET LPOP)])
     (if x (cons (f x) (loop (apply-GET LPOP))) null)))
-(define-GET (GET/list #:map-fn [f identity])
+(define-GET (GET/list #:map-fn [f (lambda (x) x)])
   (let loop ([n (sub1 (apply-GET LLEN))] [lst null])
     (if (< n 0) lst
         (let ([x (apply-GET LINDEX n)])
           (if x (loop (sub1 n) (cons (f x) lst)) (loop (sub1 n) lst))))))
-(define-GET (GET/set #:map-fn [f identity])
+(define-GET (GET/set #:map-fn [f (lambda (x) x)])
   (list->set (map f (apply-GET SMEMBERS))))
 (define-SET (SET/set)
   (DEL #:rconn conn key)
   (for ([x (in-set val)]) (apply-CMD SADD key x)))
-(define-GET (GET/hash #:map-key [fkey identity] #:map-val [fval identity])
+(define-GET (GET/hash #:map-key [fkey (lambda (x) x)] #:map-val [fval (lambda (x) x)])
   (let loop ([lst (apply-GET HGETALL)] [h (hash)])
     (if (null? lst) h 
         (loop (cddr lst) (hash-set h (fkey (car lst)) (fval (cadr lst)))))))
@@ -127,7 +130,7 @@
     (for ([(k v) (in-hash val)]) (apply-CMD HSET key k v))))
 (define-SET (SET/heap)
   (for ([(k v) (in-hash val)]) (apply-CMD ZADD key v k)))
-(define-GET (GET/heap #:map-fn [f identity] #:map-score [fsco identity])
+(define-GET (GET/heap #:map-fn [f (lambda (x) x)] #:map-score [fsco (lambda (x) x)])
   (define hp (make-heap (λ (x y) (<= (car x) (car y)))))
   (let loop ([lst (apply-GET ZRANGE 0 -1 'WITHSCORES)])
     (unless (null? lst)
