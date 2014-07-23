@@ -1,6 +1,6 @@
 #lang scribble/manual
 @(require scribble/eval
-          (for-label "redis.rkt"
+          (for-label redis
                      racket/contract/base
 		     racket/async-channel
                      racket))
@@ -12,7 +12,7 @@
 A @hyperlink["http://redis.io/"]{Redis} client for Racket.
 
 @(define the-eval (make-base-eval))
-@(the-eval '(require "redis.rkt"))
+@(the-eval '(require redis))
 
 @author[@author+email["Stephen Chang" "stchang@racket-lang.org"]]
 @author[@author+email["Marc Burns" "m4burns@csclub.uwaterloo.ca"]]
@@ -121,7 +121,7 @@ has a reply.}
 @; sending commands: specific -------------------------------------------------
 @section{Sending Commands: Specific}
 
-This client also defines functions for specific Redis commands. These functions
+Functions for specific Redis commands are also defined. These functions
 have the same arguments as @racket[send-cmd], minus the @racket[cmd] argument.
 
 Check the Redis documentation for what return values to expect.
@@ -140,7 +140,7 @@ GET/str GET/num GETRANGE/str GET/list GET/set GET/hash GET/heap}
  @item{The following POP variations are defined: POP/list}
  @item{@racket[(do-MULTI c ...)] wraps @racket[MULTI] and @racket[EXEC] around the given commands.}
 
-@item{The following functions are not available: 
+@item{The following functions are not currently available: 
 @itemlist[
  @item{SETNX, SETEX, PSETEX (use SET + options instead)}
  @item{BGREWRITEAOF BGSAVE INFO LASTSAVE MIGRATE MONITOR MOVE SAVE SHUTDOWN SLAVEOF SLOWLOG SYNC CLIENT CONFIG DEBUG EVAL EVALSHA SCRIPT}
@@ -156,7 +156,7 @@ GET/str GET/num GETRANGE/str GET/list GET/set GET/hash GET/heap}
 @deftech{pubsub-specific connection}s.
 
 @defproc[(pubsub-connection? [conn any/c]) bool/c]{
-  Indicates whether a connection is a @tech{pubsub-specific connection.}}
+  Indicates whether a connection is a @tech{pubsub-specific connection}.}
 
 @defproc[(lease-pubsub-conn [pool redis-connection-pool? (current-redis-pool)])
          pubsub-connection?]{
