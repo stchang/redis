@@ -21,7 +21,7 @@
 ;; connect/disconnect ---------------------------------------------------------
 ;; owner = thread or #f; #f = pool thread owns it
 (struct redis-connect (in out [owner #:mutable]))
-(struct redis-connection-pool (host port [dead? #:mutable] key=>conn 
+(struct redis-connection-pool (host port [dead? #:mutable] key=>conn
                                idle-conns fresh-conn-sema manager-thread))
 
 (define current-redis-pool (make-parameter #f))
@@ -38,7 +38,6 @@
                 (eq? curr-owner (current-thread)))
       (redis-error 
         (format "Attempted to ~a connection when not owner." operation-str)))))
-
   
 
 ;; Construct a redis-connection-pool that will lease at most max-connections
@@ -65,6 +64,27 @@
 ;; pool. Attempting to lease from a dead connection pool will result in an
 ;; exception. Threads that were blocked on leasing a connection from a
 ;; connection pool that was killed will block forever.
+
+;; preconditions:
+;;  conn is not present in key=>conn
+;;  conn is owned by connection pool (owner is #f)
+(define (release-conn pool conn)
+  (cond
+    ; if pool is dead, disconnect from db, ow cleanup and return to pool
+    [(redis-connection-pool-dead? pool) (disconnect conn)]
+    [else
+     ;; Reset state of returned connection.
+     (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
+     (send-cmd/no-reply #:rconn conn "UNWATCH")
+     (send-cmd/no-reply #:rconn conn "ECHO" RESET-MSG)
+     (let loop ()
+       ;; eq? only returns #t for bytes=? interned byte strings
+       (unless (equal? (get-reply (redis-connect-in conn)) RESET-MSG) (loop)))
+     (unless
+         (sync/timeout 0 (async-channel-put-evt (redis-connection-pool-idle-conns pool) conn))
+       (disconnect conn)
+       (semaphore-post (redis-connection-pool-fresh-conn-sema pool)))]))
+
 (define/contract
   (make-connection-pool #:host [host LOCALHOST]
                         #:port [port DEFAULT-REDIS-PORT]
@@ -86,37 +106,25 @@
   ;;       The "owner" field in a connection struct is just a secondary check
   (define key=>conn (make-hasheq))
   (define fresh-conn-sema (make-semaphore max-conn))
-  (define (release-conn thd.conn dead?)
-    (match-define (cons thd conn) thd.conn)
-    (hash-remove! key=>conn thd)
-    (set-redis-connect-owner! conn #f)
-;    (set-redis-connect-owner! conn (current-thread)); should be pool's thread
-    (cond ; if pool is dead, disconnect from db, ow cleanup and return to pool
-     [dead? (disconnect conn)]
-     [else
-      ;; Reset state of returned connection.
-;      (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
-;      (send-cmd #:rconn conn "UNWATCH")
-;      (send-cmd/no-reply #:rconn conn "ECHO" RESET-MSG)
-#;      (let loop ()
-        (unless (eq? (get-reply (redis-connect-in conn)) RESET-MSG) (loop)))
-      (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
-        (disconnect conn)
-        (semaphore-post fresh-conn-sema))]))
-;    (set-redis-connect-owner! conn #f))
   (define pool-thread (thread (lambda ()
     (let loop ()
       (sync
         ;; release connection if owner thread dies
         (handle-evt
           (apply choice-evt
-            (map 
-             (lambda (thd.conn) 
+            (map
+             (lambda (thd.conn)
                (wrap-evt (thread-dead-evt (car thd.conn)) (lambda _ thd.conn)))
+             ;; XXX not sure what will happen if key=>conn is modified concurrently
+             ;; here; docs say "Changes by one thread to a hash table can affect
+             ;; the keys and values seen by another thread part-way through
+             ;; its traversal"
              (hash->list key=>conn)))
           (lambda (thd.conn)
-            (when (redis-connect-owner (cdr thd.conn))
-              (release-conn thd.conn (redis-connection-pool-dead? pool)))
+            (hash-remove! key=>conn (car thd.conn))
+            (when (eq? (redis-connect-owner (cdr thd.conn)) (car thd.conn))
+              (set-redis-connect-owner! (cdr thd.conn) #f)
+              (release-conn pool (cdr thd.conn)))
             (loop)))
         (handle-evt
           (thread-receive-evt)
@@ -131,10 +139,7 @@
                     (disconnect maybe-idle-conn)
                     (dis-loop))))
               (loop)]
-             ['new (loop)]
-             [thd.conn
-              (release-conn thd.conn (redis-connection-pool-dead? pool))
-              (loop)]))))))))
+             ['new (loop)]))))))))
   (define pool
     (redis-connection-pool
       host port #f key=>conn idle-return-chan fresh-conn-sema pool-thread))
@@ -155,7 +160,7 @@
               ;; if no conns avail:
               ;; - either connection becomes available in the queue,
               ;; - or create a new connection
-              (sync/timeout 2
+              (sync/timeout 0
                 (redis-connection-pool-idle-conns pool)
                 (wrap-evt (redis-connection-pool-fresh-conn-sema pool)
                   (lambda _
@@ -175,8 +180,7 @@
   (when (hash-has-key? (redis-connection-pool-key=>conn pool) (current-thread))
     (hash-remove! (redis-connection-pool-key=>conn pool) (current-thread))
     (set-redis-connect-owner! conn #f)
-    (thread-send (redis-connection-pool-manager-thread pool)
-                 (cons (current-thread) conn))))
+    (release-conn pool conn)))
 
 #;(define/contract (connect #:host [host "127.0.0.1"] #:port [port 6379])
   (->* () (#:host string? #:port exact-nonnegative-integer?) redis-connect?)
