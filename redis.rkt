@@ -38,13 +38,14 @@
   (close-input-port in) (close-output-port out))
 
 ;; connection pool ------------------------------------------------------------
-(struct redis-connection-pool 
-  (host port [dead? #:mutable] 
+(struct redis-connection-pool
+  (host port [dead? #:mutable]
    key=>conn  ; maps thread to its (leased) connection
    pubsubs    ; leased pubsub connections
    idle-conns ; queue (async-chan) of avail (ie returned) connections
    fresh-conn-sema ; checks connection limit
-   manager-thread))
+   manager-thread
+   custodian)) ; manages all tcp connections
 
 (define current-redis-pool (make-parameter #f))
 
@@ -93,6 +94,10 @@
            #:max-connections exact-nonnegative-integer?
            #:max-idle exact-nonnegative-integer?)
        redis-connection-pool?)
+  ;; create pool connections under a separate custodian
+  ;; (otherwise connections might be suddenly closed when a
+  ;;  client thread's managing custodian shuts down)
+  (define pool-cust (make-custodian))
   ;; using async-channel here as a concurrent queue
   (define idle-return-chan (make-async-channel max-idle))
   ;; key (ie thread) \in hashtable == connection is leased out
@@ -108,18 +113,25 @@
     (hash-remove! key=>conn thd)
     (set-redis-connection-pubsub?! conn #f)
     (set-redis-connection-owner! conn #f)
-    (cond ; if pool is dead, disconnect from db, ow cleanup and return to pool
-     [dead? (disconnect conn)]
-     [else
-      ;; Reset state of returned connection.
-      (send-cmd/no-reply #:rconn conn "UNWATCH")
-      (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
-      (send-cmd/no-reply #:rconn conn "PUNSUBSCRIBE")
-      (send-cmd/no-reply #:rconn conn "ECHO" RESET-MSG)
-      (let loop () (unless (equal? (get-reply conn) RESET-MSG) (loop)))
-      (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
-        (disconnect conn)
-        (semaphore-post fresh-conn-sema))]))
+    ;; prevent exceptions from killing manager or client thread
+    ;; abandon the connection if an exception is raised
+    (with-handlers
+        ([exn? (lambda(e)
+                 ((error-display-handler) (exn-message e) e)
+                 (unless dead?
+                   (semaphore-post fresh-conn-sema)))])
+      (cond ; if pool is dead, disconnect from db, or cleanup and return to pool
+        [dead? (disconnect conn)]
+        [else
+          ;; Reset state of returned connection.
+          (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
+          (send-cmd/no-reply #:rconn conn "PUNSUBSCRIBE")
+          (send-cmd/no-reply #:rconn conn "UNWATCH")
+          (send-cmd/no-reply #:rconn conn "ECHO" RESET-MSG)
+          (let loop () (unless (equal? (get-reply conn) RESET-MSG) (loop)))
+          (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
+            (disconnect conn)
+            (semaphore-post fresh-conn-sema))])))
   (define pool-thread (thread (lambda ()
     (let loop ()
       (sync
@@ -155,7 +167,7 @@
   (define pool
     (redis-connection-pool
       host port #f key=>conn pubsubs
-      idle-return-chan fresh-conn-sema pool-thread))
+      idle-return-chan fresh-conn-sema pool-thread pool-cust))
   pool)
 
 (define (kill-connection-pool pool)
@@ -172,16 +184,18 @@
         (redis-connection-pool-idle-conns pool)
         (wrap-evt (redis-connection-pool-fresh-conn-sema pool)
           (lambda _
-            (connect (redis-connection-pool-host pool)
-                     (redis-connection-pool-port pool)))))
+            (parameterize
+               ([current-custodian (redis-connection-pool-custodian pool)])
+              (connect (redis-connection-pool-host pool)
+                       (redis-connection-pool-port pool))))))
       (redis-error "Maximum connections reached.")))
 
 (define (connection-pool-lease [pool (current-redis-pool)])
   (unless pool (redis-error "pool-lease: no pool given"))
   (when (redis-connection-pool-dead? pool)
     (redis-error "Attempted to lease connection from dead connection pool."))
-  (or 
-   ;; if curr-thread already has a connection, return the same connection
+  (or
+   ;; if cur-thread already has a connection, return the same connection
    ;; ie, 1 connection per thread
    (hash-ref (redis-connection-pool-key=>conn pool) (current-thread) #f)
    ;; else get from avail connections
