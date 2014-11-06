@@ -126,11 +126,11 @@
 
 ; test SET options
 (test
-  (check-true (SET "z" "red" "EX" 1))
+  (check-true (SET "z" "red" "EX" 1)) ; expire in 1 second
   (check-equal? (GET/str "z") "red")
   (sleep 1.5)
   (check-false (GET/str "z"))
-  (check-equal? (do-MULTI (SET "z" "blue" "PX" 1)
+  (check-equal? (do-MULTI (SET "z" "blue" "PX" 1) ; expire in 1 ms
                           (GET "z") "blue")
                 (list "OK" #"blue"))
   (sleep .1)
@@ -433,8 +433,7 @@
  ;; test for the bug fixed by m4burns, where a SUBSCRIBE
  ;; followed by a get-reply can accidentally read a message from another
  ;; subscribe instead of the SUBSCRIBE cmd reply msg
- (thread (lambda () (PUBLISH 'foo "Jello"))) ; publish with new connection
- (sleep 0.01)
+ (sync (thread (lambda () (PUBLISH 'foo "Jello")))) ; wait for thread to finish
  (SUBSCRIBE 'goo)
  (check-equal? (get-reply) (list #"message" #"foo" #"Jello"))
  (check-equal? (get-reply) (list #"subscribe" #"goo" 4))

@@ -52,9 +52,10 @@
 (parameterize ([current-redis-pool pool-max-test])
   (define exn-chan (make-async-channel))
   (define threads
-    (for/list ([n (in-range 0 101)])
+    (for/list ([n (in-range 101)])
       (thread (lambda ()
-        (with-handlers ([exn:fail:redis? (lambda _ (async-channel-put exn-chan 'fail))])
+        (with-handlers ([exn:fail:redis? 
+                         (lambda _ (async-channel-put exn-chan 'fail))])
           (connection-pool-lease))
         (thread-suspend (current-thread))))))
   (sleep 3) ; wait for threads to be created
@@ -93,4 +94,4 @@
 (check-not-exn (lambda () (kill-connection-pool pool-cust-test)))
 (sleep 1) ; need this otherwise program shutdown takes over and checks get ignored
 (check-not-exn (lambda () (kill-connection-pool pool-max-test)))
-(sleep 1) ; need this otherwise program shutdown takes over and checks get ignored
+(sleep 1) ; need this ow program shutdown takes over and checks get ignored
