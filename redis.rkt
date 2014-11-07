@@ -126,9 +126,18 @@
           ;; Reset state of returned connection.
           (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
           (send-cmd/no-reply #:rconn conn "PUNSUBSCRIBE")
-          (send-cmd/no-reply #:rconn conn "UNWATCH")
-          (send-cmd/no-reply #:rconn conn "ECHO" RESET-MSG)
-          (let loop () (unless (equal? (get-reply conn) RESET-MSG) (loop)))
+          (let loop ([unsub  #f]
+                     [punsub #f])
+            (unless (and unsub punsub)
+              (let ([reply (get-reply conn)])
+                (loop
+                  (or unsub
+                      (and (bytes=? (car reply) #"unsubscribe")
+                           (= (caddr reply) 0)))
+                  (or punsub
+                      (and (bytes=? (car reply) #"punsubscribe")
+                           (= (caddr reply) 0)))))))
+          (send-cmd #:rconn conn "UNWATCH")
           (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
             (disconnect conn)
             (semaphore-post fresh-conn-sema))])))
