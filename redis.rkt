@@ -24,7 +24,7 @@
 
 ;; connect/disconnect ---------------------------------------------------------
 ;; owner = thread or #f; #f = pool thread owns it
-(struct redis-connection (in out [owner #:mutable] [pubsub? #:auto #:mutable]))
+(struct redis-connection (in out [owner #:mutable] [pubsub #:auto #:mutable]))
 
 (define/contract (connect [host LOCALHOST] [port DEFAULT-REDIS-PORT])
   (->* () (string? (integer-in 1 65535)) redis-connection?)
@@ -111,7 +111,7 @@
     (match-define (cons thd conn) thd.conn)
     (hash-remove! pubsubs conn)
     (hash-remove! key=>conn thd)
-    (set-redis-connection-pubsub?! conn #f)
+    (set-redis-connection-pubsub! conn #f)
     (set-redis-connection-owner! conn #f)
     ;; prevent exceptions from killing manager or client thread
     ;; abandon the connection if an exception is raised
@@ -225,15 +225,11 @@
                  (cons (current-thread) conn))))
 
 ;; pubsub-specific connections ------------------------------------------------
-;; A pubsub connection spins up a few threads:
-;; - one handles subscribe/unsubscribe msgs                                   
-;;   - created during lease; only created once                                
-;; - other threads check for the published messages
-;;   - created during make-subscribe-chan
-;;   - one per key/async-chan
-;; threads are managed by a custodian
+;; A pubsub connection spins up a thread to handle subscribe/unsubscribe msgs
+;;  and distribute other messages to the appropriate channels
+;; This thread is managed by a dedicated custodian
 
-(define (pubsub-connection? conn) (redis-connection-pubsub? conn))
+(define (pubsub-connection? conn) (and (redis-connection-pubsub conn) #t))
 
 (define (lease-pubsub-conn [pool (current-redis-pool)])
   (unless pool (redis-error "pool-lease-pubsub: no pool given"))
@@ -241,60 +237,42 @@
     (redis-error "Attempted to lease connection from dead connection pool."))
   (define conn (get-idle-or-new-conn pool))
   (define cust (make-custodian))
+  (define subscribers (make-hash)) ;; key -> list of subscribed channels
   (define pubsub-th ; thread to check for sub/unsub confirmations
     (parameterize ([current-custodian cust])
-      (thread (lambda ()
+      (thread (λ ()
         (define in (redis-connection-in conn))
-        (let loop ([peek-in (peeking-input-port in)])
-          (define reply (get-reply/port peek-in))
+        (let loop ()
+          (define reply (get-reply/port in))
+          (unless (eof-object? reply)
           (cond
            [(bytes=? (car reply) #"subscribe")
             (printf "SUBSCRIBE (#~a) ~a confirmed.\n" 
-              (caddr reply) (cadr reply))
-            ;; commmit the peek
-            (unless (port-commit-peeked (file-position peek-in)
-                      (port-progress-evt in)
-                      always-evt
-                      in)
-              (redis-error "Could not read subscribe reply"))
-            (loop (peeking-input-port in))]
+              (caddr reply) (cadr reply))]
            [(bytes=? (car reply) #"psubscribe")
             (printf "PSUBSCRIBE (#~a) ~a confirmed.\n" 
-              (caddr reply) (cadr reply))
-            ;; commmit the peek
-            (unless (port-commit-peeked (file-position peek-in)
-                      (port-progress-evt in)
-                      always-evt
-                      in)
-              (redis-error "Could not read psubscribe reply"))
-            (loop (peeking-input-port in))]
+              (caddr reply) (cadr reply))]
            [(bytes=? (car reply) #"unsubscribe")
             (printf "UNSUBSCRIBE ~a confirmed, ~a subscriptions remaining.\n" 
-              (cadr reply) (caddr reply))
-            ;; commit the peek
-            (unless (port-commit-peeked (file-position peek-in)
-                      (port-progress-evt in)
-                      always-evt
-                      in)
-              (redis-error "Could not read unsubscribe reply"))
-            (loop (peeking-input-port in))]
+              (cadr reply) (caddr reply))]
            [(bytes=? (car reply) #"punsubscribe")
             (printf "PUNSUBSCRIBE ~a confirmed, ~a subscriptions remaining.\n" 
-              (cadr reply) (caddr reply))
-            ;; commit the peek
-            (unless (port-commit-peeked (file-position peek-in)
-                      (port-progress-evt in)
-                      always-evt
-                      in)
-              (redis-error "Could not read unsubscribe reply"))
-            (loop (peeking-input-port in))]
-           [else
-            (sync
-              (handle-evt (port-progress-evt in)
-                (lambda _ (unless (port-closed? in) ; if closed, let thread die
-                       (loop (peeking-input-port in))))))]))))))
+              (cadr reply) (caddr reply))]
+           ;; subscribe message
+           [(bytes=? (car reply) #"message")
+            (let* ([key   (bytes->string/utf-8 (cadr reply))]
+                   [chans (hash-ref subscribers key #f)])
+              (when chans
+                (map (λ (c) (async-channel-put c (caddr reply))) chans)))]
+           ;; psubscribe message
+           [(bytes=? (car reply) #"pmessage")
+            (let* ([key   (bytes->string/utf-8 (cadr reply))]
+                   [chans (hash-ref subscribers key #f)])
+              (when chans
+                (map (λ (c) (async-channel-put c (cddr reply))) chans)))])
+          (loop)))))))
+  (set-redis-connection-pubsub! conn subscribers)
   (hash-set! (redis-connection-pool-pubsubs pool) conn cust)
-  (set-redis-connection-pubsub?! conn #t)
   ;; should owner be #f so connection can be shared between threads?
   (set-redis-connection-owner! conn (current-thread))
   (thread-send (redis-connection-pool-manager-thread pool) 'new)
@@ -303,53 +281,21 @@
 ;; make-subscribe-chan : 
 ;; - (p)subscribes to a key on a pubsub connection
 ;; - returns an async-channel that listens for that key's messages
-(define (make-subscribe-chan conn key 
-                             [pool (current-redis-pool)] 
+(define (make-subscribe-chan conn key
+                             [pool (current-redis-pool)]
                              #:psubscribe [psub? #f])
   (unless pool (redis-error "pool-make-subscribe-chan: no pool given"))
-  (match-define (redis-connection in _ _ pubsub?) conn)
-  (unless pubsub? (redis-error "Tried to SUBSCRIBE on non pubsub connection."))
+  (match-define (redis-connection in _ _ pubsub) conn)
+  (unless pubsub (redis-error "Tried to SUBSCRIBE on non pubsub connection."))
   (send-cmd/no-reply #:rconn conn (if psub? 'psubscribe 'subscribe) key)
   (define ch (make-async-channel)) ; custodians don't affect async chans
   (define pubsubs (redis-connection-pool-pubsubs pool))
   (unless (hash-has-key? pubsubs conn)
-    (redis-error 
+    (redis-error
         "make-subscribe-chan: Not given a known pubsub connection."))
   (define str-key (or (and (string? key) key)
                       (and (symbol? key) (symbol->string key))))
-  (parameterize ([current-custodian (hash-ref pubsubs conn)])
-    (thread (λ ()
-      (let loop ([peek-in (peeking-input-port in)])
-        (define reply (get-reply/port peek-in))
-        (cond 
-         ;; subscribe message
-         [(and (bytes=? (car reply) #"message")
-               (string=? (bytes->string/utf-8 (cadr reply)) str-key))
-          (async-channel-put ch (caddr reply))
-          ;; commit the peek               
-          (unless (port-commit-peeked (file-position peek-in)
-                    (port-progress-evt in)
-                    always-evt
-                    in)
-            (redis-error "Could not read published message."))
-          (loop (peeking-input-port in))]
-         ;; psubscribe message
-         [(and (bytes=? (car reply) #"pmessage")
-               (string=? (bytes->string/utf-8 (cadr reply)) str-key))
-          (async-channel-put ch (cddr reply))
-          ;; commit the peek               
-          (unless (port-commit-peeked (file-position peek-in)
-                    (port-progress-evt in)
-                    always-evt
-                    in)
-            (redis-error "Could not read published message."))
-          (loop (peeking-input-port in))]
-         ;; else wait for port progress
-         [else
-          (sync
-            (handle-evt (port-progress-evt in)
-              (λ _ (unless (port-closed? in) ; if closed, let thread die   
-                     (loop (peeking-input-port in))))))])))))
+  (hash-update! pubsub str-key (λ (v) (cons ch v)) null)
   ch)
 
 ;; returns a pubsub connection to the pool
@@ -365,7 +311,7 @@
     (custodian-shutdown-all (hash-ref pubsubs conn))
     (hash-remove! (redis-connection-pool-pubsubs pool) conn)
     (set-redis-connection-owner! conn #f)
-    (set-redis-connection-pubsub?! conn #f)
+    (set-redis-connection-pubsub! conn #f)
     (thread-send (redis-connection-pool-manager-thread pool)
                  (cons (current-thread) conn))))
 
