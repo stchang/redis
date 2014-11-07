@@ -141,6 +141,11 @@
             (map 
              (lambda (thd.conn) 
                (wrap-evt (thread-dead-evt (car thd.conn)) (lambda _ thd.conn)))
+             ;; XXX not sure what will happen if key=>conn is modified 
+             ;; concurrently here; docs say:
+             ;;   "Changes by one thread to a hash table can affect the keys 
+             ;;    and values seen by another thread part-way through its 
+             ;;    traversal"
              (hash->list key=>conn)))
           (lambda (thd.conn)
             (when (redis-connection-owner (cdr thd.conn))
@@ -180,7 +185,9 @@
       ;; if no conns avail:
       ;; - either connection becomes available in the queue,
       ;; - or create a new connection
-      (sync/timeout 2
+      ;; a 0 timeout doesnt allow enough cleanup time so new connections will
+      ;; be created unnecessarily, and the stress test will hit max connections
+      (sync/timeout .5
         (redis-connection-pool-idle-conns pool)
         (wrap-evt (redis-connection-pool-fresh-conn-sema pool)
           (lambda _
