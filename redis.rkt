@@ -260,14 +260,12 @@
               (cadr reply) (caddr reply))]
            ;; subscribe message
            [(bytes=? (car reply) #"message")
-            (let* ([key   (bytes->string/utf-8 (cadr reply))]
-                   [chans (hash-ref subscribers key #f)])
+            (let ([chans (hash-ref subscribers (cadr reply) #f)])
               (when chans
                 (map (λ (c) (async-channel-put c (caddr reply))) chans)))]
            ;; psubscribe message
            [(bytes=? (car reply) #"pmessage")
-            (let* ([key   (bytes->string/utf-8 (cadr reply))]
-                   [chans (hash-ref subscribers key #f)])
+            (let ([chans (hash-ref subscribers (cadr reply) #f)])
               (when chans
                 (map (λ (c) (async-channel-put c (cddr reply))) chans)))])
           (loop)))))))
@@ -293,9 +291,10 @@
   (unless (hash-has-key? pubsubs conn)
     (redis-error
         "make-subscribe-chan: Not given a known pubsub connection."))
-  (define str-key (or (and (string? key) key)
-                      (and (symbol? key) (symbol->string key))))
-  (hash-update! pubsub str-key (λ (v) (cons ch v)) null)
+  (define bytes-key (or (and (string? key) (string->bytes/utf-8 key))
+                        (and (symbol? key) (string->bytes/utf-8 (symbol->string key)))
+                        key))
+  (hash-update! pubsub bytes-key (λ (v) (cons ch v)) null)
   ch)
 
 ;; returns a pubsub connection to the pool
@@ -335,7 +334,7 @@
                 new-pool)))))
   (match-define (redis-connection in out owner _) rconn)
   (check-owner-ok rconn (format "SEND-CMD (~a: ~a) on" cmd args))
-  (write-bytes (mk-request cmd args) out)
+  (write-request cmd args out)
   (flush-output out)
   rconn)
 
@@ -353,21 +352,27 @@
                                           (exn-message x) cmd args)))])
     (get-reply rconn)))
 
-(define (mk-request cmd args)
-  (bytes-append
-   (string->bytes/utf-8
-    (string-append "*" (number->string (add1 (length args))) "\r\n"))
-   (arg->bytes cmd)
-   (apply bytes-append (map arg->bytes args))))
+(define (write-request cmd args out)
+  (write-bytes
+   (bytes-append #"*"
+                 (number->bytes (add1 (length args)))
+                 #"\r\n")
+   out)
+  (write-arg cmd out)
+  (for-each (λ (arg) (write-arg arg out)) args))
 
-(define (arg->bytes val)
+(define (write-arg val out)
   (define bs
     (cond [(bytes? val) val]
           [(string? val) (string->bytes/utf-8 val)]
           [(number? val) (number->bytes val)]
           [(symbol? val) (symbol->bytes val)]
           [else (error 'send "invalid argument: ~v\n" val)]))
-  (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF bs CRLF))
+  (write-bytes
+   (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF)
+   out)
+  (write-bytes bs out)
+  (write-bytes CRLF out))
 
 ;; get-reply : reads the reply from a redis-connection
 ;; cmd and args are used for error reporting
