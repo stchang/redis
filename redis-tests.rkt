@@ -1,92 +1,79 @@
-#lang racket
+#lang at-exp racket
 (require "redis.rkt" "redis-cmds.rkt"
          "bytes-utils.rkt" "test-utils.rkt")
-(require rackunit data/heap racket/async-channel ffi/unsafe/custodian)
+(require rackunit data/heap racket/async-channel)
 
 (module+ main (displayln "Run tests with \"raco test redis-tests.rkt\"."))
 
 (module+ test
   
-  (printf
-    (~a "\n"
-      "*WARNING*: Interrupting these tests will result in data loss.\n\n"
-      "* Running these tests (temporarily) deletes keys from the db. The keys "
-      "are restored when the tests conclude but if the tests are interrupted, "
-      "the keys won't get restored, meaning you'll lose data. The current "
-      "keys are saved to disk before testing begins so if the tests get "
-      "interrupted, you should manually restore the keys from disk.\n\n"
-      "* The tests also change the redis parameters \"dir\" and "
-      "\"dbfilename\". The current parameters are similarly saved before the "
-      "tests begin and restored at the end of the tests. The tests try to "
-      "restore these parameters if the tests are interrupted, but I don't "
-      "know how well this works, so in the event of early termination, you "
-      "should check that the parameters were actually restored.\n\n"
-      "Continue with the tests? (enter 'y' to continue): "))
-  
-  (define y (read))
+  (printf 
+    @~a{
+        
+        NOTE: These tests assume a locally running redis server on port 6379.
+        
+        *WARNING*: Interrupting these tests will result in data loss.
+              
+        * These tests temporarily delete keys from the db. At the conclusion of
+        the tests, all keys are restored to their original values, but if the 
+        tests are interrupted, the restore won't occur and you'll lose data.
+        
+        * Thus, prior to running the tests, we recommend restarting the server
+        with keys loaded from the included "test.rdb".
+        
+        * As a precaution, before the tests start:
+        - all keys are saved to the current rdb file (as pointed to by the 
+          "dir" and "dbfilename" config parameters),
+        - the current rdb file is backed up to this directory (with an
+          additional ".bak" extension.),
+        - the "dir" and "dbfilename" config parameters are saved and changed
+          to temporary values, so intermediate db states are not accidentally
+          written to disk.
+        
+        * At the conclusion of the tests, in additional to the original key 
+        values, the "dir" and "dbfilename" parameters are also restored.
 
-  ;; abort
-  (unless (eq? 'y y) (error "exiting"))
+        * If the tests are interrupted, you'll have to manually restore the 
+        config parameters, as well as the keys in the db.
+
+        Continue with the tests? (enter 'y' to continue): })
   
-  ;; continue
+  ;; abort unless "y" is entered
+  (unless (eq? 'y (read)) (printf "tests aborted\n") (exit))
+  
+  ;; "y" entered, so continue with tests
   
   ;; save keys to disk
-  (newline)
-  (printf "Saving keys to disk ..........\n")
+  (printf "\nSaving keys to disk ..........\n")
   (send-cmd 'save)
   
-  ;; need to organize custodians so I still have a connection                 
-  ;; to the redis db, to restore parameters in case of shutdown                
-  (define restore-cust (make-custodian))
-  (define redis-conn-cust (make-custodian restore-cust))
-  (define shutdown-rconn
-    (parameterize ([current-custodian redis-conn-cust]) (connect)))
-  
+  ;; save current "dir" and "dbfilename" config params
   (define rdb-dir
     (bytes->string/utf-8 (second (send-cmd 'config 'get 'dir))))
   (define rdb-file
     (bytes->string/utf-8 (second (send-cmd 'config 'get 'dbfilename))))
-  (newline)
-  (printf "Saving current parameters: ..........\n")
+  (printf "\nSaving current parameters: ..........\n")
   (printf "current \"dir\": ~a\n" rdb-dir)
   (printf "current \"dbfilename\": ~a\n" rdb-file)
-  ;; /var/lib/redis/6379/dump.rdb
+  ;; eg, /var/lib/redis/6379/dump.rdb
   (define rdb-path (build-path rdb-dir rdb-file))
-  
-  ;; restore old params in case of premature exit 
-  (define dir+file (list rdb-dir rdb-file))
-  (define cust-reg  
-    (register-custodian-shutdown dir+file
-      (λ (dir+file)
-        (define dir (first dir+file))
-        (define file (second dir+file))
-        (printf "Premature exit. Restoring old parameters: ..........\n")
-        (printf "- restoring \"dir\" to: ~a\n" dir)
-        (send-cmd #:rconn shutdown-rconn 'config 'set 'dir dir)
-        (printf "- restoring \"dbfilename\" to: ~a\n" file)
-        (send-cmd #:rconn shutdown-rconn 'config 'set 'dbfilename file))
-      restore-cust #:at-exit? #t))
-  
-  (define current-dir (path->string (current-directory)))
+
+  ;; save current rdb file to this test directory
+  (define test-dir (path->string (current-directory)))
   (define tmp-rdb-file "tmp.rdb")
-  (define backup-path (build-path current-dir (~a rdb-file ".bak")))
-  
-  (newline)
-  ;; backup rdb file 
-  (printf "Backing up rdb file: ..........\n- from: ~a\n- to: ~a\n"
+  (define backup-path (build-path test-dir (~a rdb-file ".bak")))
+  (printf "\nBacking up rdb file: ..........\n- from: ~a\n- to: ~a\n"
     rdb-path backup-path)
-  (copy-file rdb-path backup-path #t)
+  (copy-file rdb-path backup-path #t) ; back up current rdb file
                      
-  (newline)
-  ;; set tmp rdb file    
-  (printf "Setting tmp dir: ~a\n" current-dir)
-  (send-cmd 'config 'set 'dir current-dir)
+  ;; set temporary "dir" and "dbfilename" params
+  (printf "\nSetting tmp dir: ~a\n" test-dir)
+  (send-cmd 'config 'set 'dir test-dir)
   (printf "Setting tmp rdb file: ~a\n" tmp-rdb-file)
   (send-cmd 'config 'set 'dbfilename tmp-rdb-file)
   
   ;; do tests  
-  (newline)
-  (printf "Running tests ..........\n")
+  (printf "\nRunning tests ..........\n")
 
   ;; BEGIN TESTS --------------------------------------------------------------
   
@@ -694,12 +681,10 @@
  (check-equal? (length (TIME)) 2)
  (check-equal? (car (TIME)) (car (TIME))))
 
-  ;; restore old config parameters 
-  (newline)
-  (printf "Tests done. Restoring old parameters: ..........\n")
+  ;; restore original "dir" and "dbfilename" config parameters 
+  (printf "\nTests done. Restoring old parameters: ..........\n")
   (printf "- restoring \"dir\" to: ~a\n" rdb-dir)
   (send-cmd 'config 'set 'dir rdb-dir)
   (printf "- restoring \"dbfilename\" to: ~a\n" rdb-file)
   (send-cmd 'config 'set 'dbfilename rdb-file)
-  (unregister-custodian-shutdown dir+file cust-reg)
 )
