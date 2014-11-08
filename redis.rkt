@@ -109,6 +109,9 @@
   (define fresh-conn-sema (make-semaphore max-conn))
   (define (release-conn thd.conn dead?)
     (match-define (cons thd conn) thd.conn)
+    (let ([maybe-cust (hash-ref pubsubs conn #f)])
+      (when maybe-cust
+        (custodian-shutdown-all maybe-cust)))
     (hash-remove! pubsubs conn)
     (hash-remove! key=>conn thd)
     (set-redis-connection-pubsub! conn #f)
@@ -124,19 +127,26 @@
         [dead? (disconnect conn)]
         [else
           ;; Reset state of returned connection.
-          (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
+          ;; Subscribe to a fake channel so that we can synchronize unsubscribing
+          ;;  regardless of the commands queued on this connection
+          (send-cmd/no-reply #:rconn conn "SUBSCRIBE" "clean-me-up")
           (send-cmd/no-reply #:rconn conn "PUNSUBSCRIBE")
-          (let loop ([unsub  #f]
-                     [punsub #f])
-            (unless (and unsub punsub)
-              (let ([reply (get-reply conn)])
-                (loop
-                  (or unsub
-                      (and (bytes=? (car reply) #"unsubscribe")
-                           (= (caddr reply) 0)))
-                  (or punsub
-                      (and (bytes=? (car reply) #"punsubscribe")
-                           (= (caddr reply) 0)))))))
+          (send-cmd/no-reply #:rconn conn "UNSUBSCRIBE")
+          (let loop ()
+            (let ([reply (get-reply conn)])
+              (unless (and (list? reply)
+                           (= (length reply) 3)
+                           (bytes=? (car reply) #"subscribe")
+                           (bytes=? (cadr reply) #"clean-me-up"))
+                (loop))))
+          (let loop ()
+            (let ([reply (get-reply conn)])
+              (unless (and (list? reply)
+                           (= (length reply) 3)
+                           (or (bytes=? (car reply) #"unsubscribe")
+                               (bytes=? (car reply) #"punsubscribe"))
+                           (= (caddr reply) 0))
+                (loop))))
           (send-cmd #:rconn conn "UNWATCH")
           (unless (sync/timeout 0 (async-channel-put-evt idle-return-chan conn))
             (disconnect conn)

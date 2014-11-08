@@ -11,8 +11,10 @@
         (dynamic-wind
           (lambda _ (for-each (lambda (x) (check-equal? (DEL x) 1)) keys))
           (lambda _ tst ...)
-          (lambda _ (for-each (lambda (k v) (DEL k) (RESTORE k 0 v)) keys old)
-               (kill-connection-pool (current-redis-pool))))))))
+          (lambda _
+            (connection-pool-return (connection-pool-lease))
+            (for-each (lambda (k v) (DEL k) (RESTORE k 0 v)) keys old)
+            (kill-connection-pool (current-redis-pool))))))))
 
 (define-syntax-rule (check-redis-exn e)
   (check-exn exn:fail:redis? (lambda () e)))
