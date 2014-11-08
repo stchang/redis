@@ -1,4 +1,4 @@
-#lang racket/base
+#lang racket
 
 ; redis bindings for racket
 
@@ -14,7 +14,8 @@
 (require (for-syntax racket/base syntax/parse)
          racket/tcp racket/match 
          racket/async-channel racket/contract racket/port
-         "redis-error.rkt" "bytes-utils.rkt" "constants.rkt")
+         "redis-error.rkt" "bytes-utils.rkt" "constants.rkt"
+         "nodelay.rkt")
 (provide connect disconnect (struct-out redis-connection)
          send-cmd send-cmd/no-reply current-redis-pool
          get-reply get-reply/port get-reply-evt get-reply-evt/port
@@ -29,6 +30,8 @@
 (define/contract (connect [host LOCALHOST] [port DEFAULT-REDIS-PORT])
   (->* () (string? (integer-in 1 65535)) redis-connection?)
   (define-values (in out) (tcp-connect host port))
+  (set-tcp-nodelay! out #t)
+  (file-stream-buffer-mode out 'block)
   (redis-connection in out (current-thread)))
 
 (define/contract (disconnect conn)
@@ -353,7 +356,7 @@
                 new-pool)))))
   (match-define (redis-connection in out owner _) rconn)
   (check-owner-ok rconn (format "SEND-CMD (~a: ~a) on" cmd args))
-  (write-request cmd args out)
+  (write-bytes (mk-request cmd args) out)
   (flush-output out)
   rconn)
 
@@ -371,27 +374,21 @@
                                           (exn-message x) cmd args)))])
     (get-reply rconn)))
 
-(define (write-request cmd args out)
-  (write-bytes
-   (bytes-append #"*"
-                 (number->bytes (add1 (length args)))
-                 #"\r\n")
-   out)
-  (write-arg cmd out)
-  (for-each (λ (arg) (write-arg arg out)) args))
+(define (mk-request cmd args)
+  (bytes-append
+   (string->bytes/utf-8
+    (string-append "*" (number->string (add1 (length args))) "\r\n"))
+   (arg->bytes cmd)
+   (apply bytes-append (map arg->bytes args))))
 
-(define (write-arg val out)
+(define (arg->bytes val)
   (define bs
     (cond [(bytes? val) val]
           [(string? val) (string->bytes/utf-8 val)]
           [(number? val) (number->bytes val)]
           [(symbol? val) (symbol->bytes val)]
           [else (error 'send "invalid argument: ~v\n" val)]))
-  (write-bytes
-   (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF)
-   out)
-  (write-bytes bs out)
-  (write-bytes CRLF out))
+  (bytes-append #"$" (number->bytes (bytes-length bs)) CRLF bs CRLF))
 
 ;; get-reply : reads the reply from a redis-connection
 ;; cmd and args are used for error reporting
