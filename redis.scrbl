@@ -245,12 +245,12 @@ or @racket[PUNSUBSCRIBE] with the appropriate @tech{pubsub-specific connection}.
 (redis-connection? pubsubconn)
 (pubsub-connection? pubsubconn)
 (define foo-chan (make-subscribe-chan pubsubconn 'foo pool))
-;(define bar-chan (make-subscribe-chan pubsubconn 'bar pool))
+(define bar-chan (make-subscribe-chan pubsubconn 'bar pool))
 (sleep 1)
 (thread (λ () (PUBLISH 'foo "Hello")))
 (thread (λ () (PUBLISH 'bar "World!")))
 (async-channel-get foo-chan)
-;(async-channel-get bar-chan)
+(async-channel-get bar-chan)
 ]}
 
 @defproc[(return-pubsub-conn
